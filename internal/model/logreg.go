@@ -43,6 +43,11 @@ func (m *LogReg) Logit(x []float32) float64 {
 func (m *LogReg) Prob(x []float32) float64 { return Sigmoid(m.Logit(x)) }
 
 // Fit 은 rows 로 지정한 행만 써서 학습한다.
+//
+// y 는 위치가 아니라 원본 행렬 행 인덱스로 정렬된 전체 길이 배열이다 — 즉
+// i번째 학습 표본의 라벨은 y[i] 가 아니라 y[rows[i]] 다. rows 가 원본 순서와
+// 다르게(비연속·재정렬) 주어져도 각 행이 자기 라벨을 정확히 찾아가도록 하는
+// 설계다. Task 11 은 이 규약에 의존한다.
 func Fit(mat *Matrix, rows []int, y []float64, names []string, l2 float64) (*LogReg, error) {
 	n, p := len(rows), mat.Cols
 	if n == 0 {
@@ -87,44 +92,8 @@ func Fit(mat *Matrix, rows []int, y []float64, names []string, l2 float64) (*Log
 	}
 
 	// w = [계수 p개, 절편]. 절편은 정규화에서 제외한다.
-	objective := func(w []float64) float64 {
-		var ll float64
-		for i := 0; i < n; i++ {
-			s := w[p]
-			zi := z[i*p : (i+1)*p]
-			for j := 0; j < p; j++ {
-				s += zi[j] * w[j]
-			}
-			// 수치 안정 log-loss: logaddexp(0, s) − y*s
-			ll += logAddExp0(s) - yy[i]*s
-		}
-		var reg float64
-		for j := 0; j < p; j++ {
-			reg += w[j] * w[j]
-		}
-		return ll + 0.5*l2*reg
-	}
-
-	gradient := func(grad, w []float64) {
-		for j := range grad {
-			grad[j] = 0
-		}
-		for i := 0; i < n; i++ {
-			s := w[p]
-			zi := z[i*p : (i+1)*p]
-			for j := 0; j < p; j++ {
-				s += zi[j] * w[j]
-			}
-			r := Sigmoid(s) - yy[i]
-			for j := 0; j < p; j++ {
-				grad[j] += zi[j] * r
-			}
-			grad[p] += r
-		}
-		for j := 0; j < p; j++ {
-			grad[j] += l2 * w[j]
-		}
-	}
+	objective := func(w []float64) float64 { return negLogLoss(w, z, yy, l2, n, p) }
+	gradient := func(grad, w []float64) { negLogLossGrad(grad, w, z, yy, l2, n, p) }
 
 	problem := optimize.Problem{Func: objective, Grad: gradient}
 	// 목적함수가 L2 때문에 강볼록이라 최적점이 유일하다. 여기서는 그 최적점까지
@@ -137,18 +106,14 @@ func Fit(mat *Matrix, rows []int, y []float64, names []string, l2 float64) (*Log
 		Converger:         &optimize.FunctionConverge{Absolute: 1e-12, Iterations: 50},
 	}
 	res, err := optimize.Minimize(problem, make([]float64, p+1), settings, &optimize.LBFGS{})
-	if err != nil && res == nil {
+	if res == nil {
 		return nil, fmt.Errorf("최적화 실패: %w", err)
 	}
-	if serr := res.Status.Err(); serr != nil {
-		// 기울기 1e-8 문턱은 float64 정밀도 바닥에 거의 닿아 있다. 라인서치가
-		// 그 바닥에서 더는 전진하지 못해 Failure 로 끝나더라도, 마지막 위치의
-		// 기울기가 이미 충분히 작다면(강볼록이므로 최적점 근방) 수렴으로 본다.
-		// 흉내내는 대상은 scipy 의 이른 정지가 아니라, float64 로 갈 수 있는
-		// 한계까지 실제로 밀어붙인 결과다.
-		if gnorm := maxAbs(res.Gradient); gnorm > convergedGradTol {
-			return nil, fmt.Errorf("최적화 상태: %v (|g|max=%.3g): %w", res.Status, gnorm, serr)
+	if cerr := checkConverged(res, p, n); cerr != nil {
+		if err != nil {
+			return nil, fmt.Errorf("최적화 결과 거부 (status=%v): %w: %w", res.Status, cerr, err)
 		}
+		return nil, fmt.Errorf("최적화 결과 거부 (status=%v): %w", res.Status, cerr)
 	}
 
 	coef := make([]float64, p)
@@ -167,10 +132,84 @@ func logAddExp0(s float64) float64 {
 	return math.Log1p(math.Exp(s))
 }
 
-// convergedGradTol 은 라인서치가 float64 정밀도 바닥에서 Failure 로 끝났을 때
-// "사실상 수렴"으로 인정할 |g|max 상한이다. 팀리드가 실측한 조인 설정의 도달치가
-// ~1e-4 였던 것에 여유를 두었다 — scipy 의 0.57~1.04 와는 두 자릿수 이상 차이난다.
-const convergedGradTol = 1e-3
+// negLogLoss 는 표준화된 설계행렬 z(n×p, 행 우선), 라벨 yy 에 대한 L2 정규화
+// 음의 로그가능도다. w = [계수 p개, 절편]. 절편은 정규화에서 제외한다.
+// Fit 밖으로 뺀 이유는 gradient 와 함께 유한차분으로 직접 검증하기 위해서다.
+func negLogLoss(w, z, yy []float64, l2 float64, n, p int) float64 {
+	var ll float64
+	for i := 0; i < n; i++ {
+		s := w[p]
+		zi := z[i*p : (i+1)*p]
+		for j := 0; j < p; j++ {
+			s += zi[j] * w[j]
+		}
+		// 수치 안정 log-loss: logaddexp(0, s) − y*s
+		ll += logAddExp0(s) - yy[i]*s
+	}
+	var reg float64
+	for j := 0; j < p; j++ {
+		reg += w[j] * w[j]
+	}
+	return ll + 0.5*l2*reg
+}
+
+// negLogLossGrad 는 negLogLoss 의 그라디언트다. grad 는 len(w) 로 미리 할당돼
+// 있어야 한다.
+func negLogLossGrad(grad, w, z, yy []float64, l2 float64, n, p int) {
+	for j := range grad {
+		grad[j] = 0
+	}
+	for i := 0; i < n; i++ {
+		s := w[p]
+		zi := z[i*p : (i+1)*p]
+		for j := 0; j < p; j++ {
+			s += zi[j] * w[j]
+		}
+		r := Sigmoid(s) - yy[i]
+		for j := 0; j < p; j++ {
+			grad[j] += zi[j] * r
+		}
+		grad[p] += r
+	}
+	for j := 0; j < p; j++ {
+		grad[j] += l2 * w[j]
+	}
+}
+
+// gradTolPerSample 은 checkConverged 가 요구하는 |g|max 상한을 표본 수 n 에
+// 비례해 정한다. negLogLoss 는 n개 표본에 대한 합이라 같은 적합도라도 |g|max
+// 는 n 에 거의 비례해서 커진다 — 절대 상수를 쓰면 작은 학습 구간에서는 헐겁고
+// 100만행 규모에서는 너무 빡빡해서 실패하는 최악의 형태가 된다(작을 때 통과,
+// 커지면 실패). 실측치 기준: n≈51,840 짜리 walk-forward 블록은 |g|max
+// 2e-7~2e-5 로 이 상한(1.04e-3)의 2% 안쪽이고, n=945,000 짜리 큰 창은 |g|max
+// 9.58e-4 로 그 창의 상한(1.89e-2)의 5% 안쪽이다 — 이 계수는 실제 도달치보다
+// 훨씬 느슨한 안전 상한이지 목표치가 아니다.
+const gradTolPerSample = 2e-8
+
+// checkConverged 는 gonum 이 반환한 결과가 실제로 쓸만한 해인지 검사한다.
+// Status 딱지(Success/GradientThreshold/...)에 기대지 않고 기울기를 직접
+// 보는 이유는 두 가지다.
+//
+//  1. Status.Err() 가 nil 인 "정상" 경로라도 |g|max 를 보장하지 않는 경우가
+//     있다(예: FunctionConvergence 는 함수값 변화가 작다는 것만 보장한다).
+//     그래서 모든 종료 경로에 같은 기울기 사후조건을 건다.
+//  2. 시작점이 NaN/Inf 로 평가되면 gonum 은 첫 반복도 못 채운 채 Failure 로
+//     끝나고, 이때 res.Gradient 는 nil 이다. maxAbs(nil) 은 0 을 반환하므로
+//     길이 검사 없이 기울기만 봤다가는 "발산했는데 기울기가 0 이라 통과"라는
+//     최악의 오탐(라벨/피처에 NaN 이 섞였는데도 조용히 절편 0 짜리 모델을
+//     내보내는 것)이 생긴다. 그래서 길이부터 확인한다.
+func checkConverged(res *optimize.Result, p, n int) error {
+	g := res.Gradient
+	if len(g) != p+1 {
+		return fmt.Errorf("기울기가 채워지지 않았다(len=%d, 기대 %d) — 시작점이 발산했거나 입력에 NaN/Inf 가 섞였을 수 있다", len(g), p+1)
+	}
+	gnorm := maxAbs(g)
+	tol := gradTolPerSample * float64(n)
+	if gnorm > tol {
+		return fmt.Errorf("|g|max=%.3g 가 허용치 %.3g(=%.1e × n=%d) 를 초과했다", gnorm, tol, gradTolPerSample, n)
+	}
+	return nil
+}
 
 func maxAbs(v []float64) float64 {
 	var m float64
