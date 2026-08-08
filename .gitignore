@@ -1,10 +1,22 @@
+# 빌드 산출물 — 루트 앵커가 없으면 cmd/backtest/ 같은 디렉터리까지 무시된다
+/gld91
+/train
+/backtest
+/probe
+/align
+/goldencheck
+
+# 시크릿
 .env
 *.env
+
+# 런타임 산출물
 .omc/
+.superpowers/
 data/
 cache/
+out/
+
 *.log
-gld91
-train
-backtest
-probe
+# 게이트 결과는 기록으로 남긴다
+!docs/results/*.log
