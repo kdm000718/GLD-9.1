@@ -85,3 +85,24 @@ func TestEmptyFileIsNotAnError(t *testing.T) {
 		t.Errorf("빈 파일인데 %d행", len(arr))
 	}
 }
+
+func TestToBarsAndDedup(t *testing.T) {
+	// LoadFullHistory 의 정렬·중복제거 로직을 toBars 앞단까지 흉내낸다
+	rows := [][11]float64{
+		{2000, 2, 2, 2, 2, 1, 2059, 1, 1, 1, 1},
+		{1000, 1, 1, 1, 1, 1, 1059, 1, 1, 1, 1},
+		{2000, 9, 9, 9, 9, 9, 2059, 9, 9, 9, 9}, // 중복 open_time
+	}
+	sortRows(rows)
+	rows = dedupRows(rows)
+	if len(rows) != 2 {
+		t.Fatalf("중복 제거 후 %d행, 기대 2행", len(rows))
+	}
+	b := toBars(rows)
+	if b.OpenTime[0] != 1000 || b.OpenTime[1] != 2000 {
+		t.Errorf("정렬 실패: %v", b.OpenTime)
+	}
+	if b.Open[1] != 2 {
+		t.Errorf("중복 제거가 먼저 나온 행을 남기지 않았다: %v", b.Open[1])
+	}
+}
