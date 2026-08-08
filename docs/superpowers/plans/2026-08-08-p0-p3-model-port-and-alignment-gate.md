@@ -15,7 +15,7 @@
 - 시크릿은 환경변수로만 읽는다: `PREDICT_API_KEY`. 소스·로그·에러 메시지 어디에도 값을 남기지 않는다.
 - predict.fun REST 는 `x-api-key` 헤더와 명시적 `User-Agent`가 둘 다 필요하다. 기본 Go User-Agent 는 WAF 가 403 으로 막는다.
 - predict.fun REST 레이트리밋은 API 키당 240 req/min 이다. 클라이언트는 이 한도 아래로 스스로 조절한다.
-- 가격 비교에 float 를 쓰지 않는다. 가격은 마켓의 `decimalPrecision`(BTC 5분 마켓 실측값 2)으로 정규화한 정수 틱으로 다룬다.
+- **호가창 가격과 주문 가격**은 float 로 비교하지 않는다. 마켓의 `decimalPrecision`(BTC 5분 마켓 실측값 2)으로 정규화한 정수 틱으로 다룬다. 이 제약은 틱 격자 위에 있는 값에만 적용된다 — Chainlink 오라클 기준가처럼 틱 개념이 없는 값은 대상이 아니며, 그런 값의 방향 판정에는 `float64` 뺄셈의 부호를 쓴다.
 - 피처 순서는 `FeatureNames` 슬라이스가 유일한 근거다. Python `btc5m/features.py:FEATURE_NAMES` 와 원소·순서가 완전히 같아야 한다.
 - 부동소수점 비교 허용오차: 피처 `1e-9`, 정확도 `±0.01%p`, AUC `±0.0005`. 표본 수는 허용오차 없이 완전 일치.
 - 참조 구현은 `/home/kdm00/kdm/btc5m_prediction_agent` 이다. 동작이 애매하면 추측하지 말고 그 코드를 읽는다.
