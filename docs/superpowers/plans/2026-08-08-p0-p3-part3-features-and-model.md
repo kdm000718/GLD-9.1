@@ -902,8 +902,17 @@ git commit -m "G1 피처 동등성 게이트 — Python 골든 벡터 2000시점
 ### Task 9: 로지스틱 회귀 — 추론과 학습
 
 `scipy.optimize.minimize(method="L-BFGS-B")` 자리에 `gonum.org/v1/gonum/optimize` 의
-LBFGS 를 쓴다. 목적함수가 L2 항 때문에 **강볼록**이라 최적점이 유일하고, 수렴
-조건만 충분히 조이면 두 최적화기가 같은 점에 도달한다. 이것이 Task 12 재현의 근거다.
+LBFGS 를 쓴다. 목적함수가 L2 항 때문에 **강볼록**이라 최적점이 유일하다.
+
+**단, 두 최적화기가 같은 점에 도달하지는 않는다.** 팀리드가 실측했다 —
+참조 실행의 scipy 는 |g|max 가 0.57~1.04 인 지점에서 멈춘다(수렴 아님).
+조인 설정은 ~1e-4 까지 간다. Python 의 52.773% 는 최적점의 값이 아니라
+scipy 가 멈춘 자리의 값이고, gonum 을 조일수록 그 자리에서 멀어진다.
+
+그래도 조이는 것이 맞다. 실거래 모델은 최적점에 있는 편이 낫고, 실측한
+차이는 작다 — 확률 최대 1.2e-3, 판정 뒤집힘 0.055%, AUC 차이 7.9e-06.
+Task 12 는 이 차이를 감안한 허용오차로 대조한다. 여기서 scipy 의 정지
+조건을 흉내내려 하지 말 것.
 
 100만 행 × 60 피처를 다루므로 `[][]float64` 가 아니라 평면 `float32` 행렬을 쓴다
 (Python 도 float32 를 썼다).
@@ -1305,8 +1314,10 @@ func Fit(mat *Matrix, rows []int, y []float64, names []string, l2 float64) (*Log
 	}
 
 	problem := optimize.Problem{Func: objective, Grad: gradient}
-	// 목적함수가 L2 때문에 강볼록이라 최적점이 유일하다. 수렴만 충분히 조이면
-	// scipy L-BFGS-B 와 같은 점에 도달한다 — Task 12 재현의 근거다.
+	// 목적함수가 L2 때문에 강볼록이라 최적점이 유일하다. 여기서는 그 최적점까지
+	// 제대로 수렴시킨다. 참조 구현의 scipy 는 기본 ftol 때문에 |g|max 0.6~1.0 에서
+	// 멈추지만, 그 정지 지점을 흉내내지 않는다 — 실거래 모델은 최적점에 있는 편이
+	// 낫고, 실측한 차이는 확률 1.2e-3 수준으로 작다. Task 12 가 그만큼을 감안한다.
 	settings := &optimize.Settings{
 		GradientThreshold: 1e-8,
 		MajorIterations:   2000,
