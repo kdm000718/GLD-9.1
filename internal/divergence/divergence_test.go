@@ -113,3 +113,65 @@ func TestEmptyInputIsZeroSignal(t *testing.T) {
 		t.Errorf("빈 입력인데 Score = %v", s.Score())
 	}
 }
+
+func TestFindPivotsTieKeepsFirstBarOfPlateau(t *testing.T) {
+	// 평탄 구간에서는 첫 봉만 피벗이다. 'c > 왼쪽' 과 'c >= 오른쪽' 의
+	// 비대칭이 그것을 만든다 — 대칭으로 바꾸면 Python 과 어긋난다.
+	cases := []struct {
+		name   string
+		values []float64
+		kind   string
+		want   []int
+	}{
+		{"고점 평탄 3봉", []float64{1, 5, 5, 5, 1, 1, 1}, "high", []int{1}},
+		{"고점 평탄 2봉", []float64{1, 2, 5, 5, 2, 1, 1}, "high", []int{2}},
+		{"저점 평탄 3봉", []float64{9, 5, 5, 5, 9, 9, 9}, "low", []int{1}},
+	}
+	for _, c := range cases {
+		got := FindPivots(c.values, 1, c.kind)
+		if len(got) != len(c.want) {
+			t.Fatalf("%s: %v, 기대 %v", c.name, got, c.want)
+		}
+		for i := range c.want {
+			if got[i] != c.want[i] {
+				t.Fatalf("%s: %v, 기대 %v", c.name, got, c.want)
+			}
+		}
+	}
+}
+
+func TestFindPivotsUnaffectedByDistantNaN(t *testing.T) {
+	v := []float64{math.NaN(), 1, 2, 5, 2, 1, 2, 6, 2, 1, 1}
+	got := FindPivots(v, 2, "high")
+	want := []int{3, 7}
+	if len(got) != len(want) {
+		t.Fatalf("피벗 %v, 기대 %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("피벗 %v, 기대 %v", got, want)
+		}
+	}
+}
+
+func TestDedupeCloseKeepsLaterPivot(t *testing.T) {
+	// minSep 보다 가까우면 나중 것만 남는다.
+	got := dedupeClose([]int{10, 12, 30}, 5)
+	want := []int{12, 30}
+	if len(got) != len(want) {
+		t.Fatalf("%v, 기대 %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("%v, 기대 %v", got, want)
+		}
+	}
+	// 떨어져 있으면 둘 다 남는다
+	if g := dedupeClose([]int{10, 20}, 5); len(g) != 2 {
+		t.Errorf("%v, 둘 다 남아야 한다", g)
+	}
+	// 빈 입력
+	if g := dedupeClose(nil, 5); len(g) != 0 {
+		t.Errorf("%v, 빈 결과여야 한다", g)
+	}
+}
