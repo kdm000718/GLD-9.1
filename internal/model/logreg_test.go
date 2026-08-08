@@ -276,14 +276,19 @@ func TestCheckConvergedRejectsMissingGradient(t *testing.T) {
 }
 
 // 허용 상한은 n 에 비례해야 한다 — 절대 상수면 작은 학습 구간에서는 헐겁고
-// 100만행 규모에서는 너무 빡빡해서 실패하는 최악의 형태가 된다.
+// 100만행 규모에서는 너무 빡빡해서 실패하는 최악의 형태가 된다. gradTolPerSample
+// 상수 자체를 참조해서 검증한다 — 이 값이 나중에 다시 조정돼도(실제로 이미
+// 한 번 바뀌었다) 이 테스트는 "n 에 비례한다"는 성질만 계속 확인한다.
 func TestCheckConvergedToleranceScalesWithN(t *testing.T) {
+	small, large := 1000, 1_000_000
+	// small 기준 상한의 2배인 기울기 — small 에서는 거부, large 에서는 통과해야 한다.
+	gnorm := gradTolPerSample * float64(small) * 2
 	res := &optimize.Result{Status: optimize.GradientThreshold}
-	res.Gradient = []float64{1e-3, 1e-3, 1e-3} // |g|max = 1e-3
-	if err := checkConverged(res, 2, 1000); err == nil {
-		t.Error("n=1000 에서는 |g|max=1e-3 이 상한(2e-5)을 넘어야 하는데 통과했다")
+	res.Gradient = []float64{gnorm, 0, 0}
+	if err := checkConverged(res, 2, small); err == nil {
+		t.Errorf("|g|max=%v 가 n=%d 상한(%v)의 2배인데 통과했다", gnorm, small, gradTolPerSample*float64(small))
 	}
-	if err := checkConverged(res, 2, 1_000_000); err != nil {
-		t.Errorf("n=1,000,000 에서는 |g|max=1e-3 이 상한(2e-2) 안쪽인데 거부했다: %v", err)
+	if err := checkConverged(res, 2, large); err != nil {
+		t.Errorf("|g|max=%v 는 n=%d 상한(%v) 안쪽인데 거부했다: %v", gnorm, large, gradTolPerSample*float64(large), err)
 	}
 }
