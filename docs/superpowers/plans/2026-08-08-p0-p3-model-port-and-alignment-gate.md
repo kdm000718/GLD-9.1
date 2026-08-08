@@ -46,6 +46,18 @@
 | `cmd/backtest/main.go` | **G1'** — 전 구간 워크포워드 재현 |
 | `tools/export_golden.py` | Python 쪽에서 골든 벡터 내보내기 |
 
+## 스펙 대비 범위 재조정 두 가지
+
+**G2 를 맨 앞으로 옮겼다.** 스펙은 정합 측정을 P3 에 뒀지만, 이 측정은 모델과 아무
+의존관계가 없는 순수 데이터 비교다. 판정 게이트를 앞에 두면 실패했을 때 포팅을 한 줄도
+쓰지 않고 멈출 수 있다. Task 1 이 그것이다.
+
+**P2(predict.fun WS 오더북 이식)는 이 계획에서 뺐다.** 스펙에서 P2 를 둔 이유는 G2 에
+오더북 이력이 필요할 것으로 봤기 때문인데, REST 가 `variantData.startPrice`/`endPrice`
+를 직접 주므로 오더북 없이 정합을 잴 수 있다는 것이 확인됐다. WS 스트림은 이제 실행
+절반(마켓메이킹 루프)에만 필요하므로 P4~P6 계획으로 옮긴다. 이 계획은 REST 읽기 경로만
+만든다.
+
 ---
 
 ### Task 1: 저장소 부트스트랩 + G2 정합 게이트
@@ -664,51 +676,8 @@ func Fetch(ctx context.Context, symbol, interval string, startMS, endMS int64) (
 	return out, nil
 }
 
-func getRows(ctx context.Context, c *http.Client, u string) ([]json.RawMessage, error) {
-	var last error
-	for attempt := 0; attempt < 5; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("User-Agent", "gld91/0.1")
-		resp, err := c.Do(req)
-		if err != nil {
-			last = err
-		} else {
-			func() {
-				defer resp.Body.Close()
-				if resp.StatusCode != http.StatusOK {
-					last = fmt.Errorf("Binance HTTP %d", resp.StatusCode)
-					return
-				}
-				var rows []json.RawMessage
-				if e := json.NewDecoder(resp.Body).Decode(&rows); e != nil {
-					last = e
-					return
-				}
-				last = nil
-				u = "" // 성공 표시용은 아니고, 아래에서 rows 를 반환한다
-				_ = rows
-			}()
-			// 위 클로저에서 rows 를 밖으로 못 빼므로 다시 단순하게 처리한다
-		}
-		if last == nil {
-			break
-		}
-		select {
-		case <-time.After(time.Duration(attempt+1) * 1500 * time.Millisecond):
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
-	}
-	return nil, last
-}
-```
-
-**주의: 위 `getRows` 는 클로저 때문에 rows 를 반환하지 못한다. 아래 형태로 쓴다.**
-
-```go
+// getRows 는 재시도 루프만 담당하고 한 번의 요청은 getRowsOnce 에 맡긴다.
+// 한 함수에 defer 와 재시도를 섞으면 응답 본문을 언제 닫는지가 흐려진다.
 func getRows(ctx context.Context, c *http.Client, u string) ([]json.RawMessage, error) {
 	var last error
 	for attempt := 0; attempt < 5; attempt++ {
@@ -810,8 +779,6 @@ func parseRow(raw json.RawMessage) (Kline, error) {
 	return k, nil
 }
 ```
-
-`getRows` 의 첫 버전은 지우고 두 번째 버전만 남긴다.
 
 - [ ] **Step 20: 테스트 통과 확인**
 
