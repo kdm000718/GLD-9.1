@@ -93,3 +93,27 @@ func TestLastPriceIsLastClosedBar(t *testing.T) {
 		t.Errorf("LastPrice = %v, 기대 299 (299번 봉의 종가)", got)
 	}
 }
+
+func TestBarClosingExactlyAtTIsExcluded(t *testing.T) {
+	// close_time == t 인 봉은 보이지 않는다. Python 의
+	// searchsorted(close_time, t, side="left") 와 같은 경계다.
+	// 실데이터에서는 close_time 이 항상 open+interval-1 이라 이 경우가
+	// 생기지 않지만, 절단 규칙 자체를 고정해 둔다.
+	b1 := mk(10, 60_000)
+	b5 := mk(10, 300_000)
+	// 5번 1분봉의 close_time 을 정확히 t 로 맞춘다
+	target := b1.OpenTime[5] + 60_000 - 1
+	b1.CloseTime[5] = target
+
+	v, err := New(target, b1, b5, target-(target%300_000))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	// 인덱스 5 는 close_time == t 이므로 제외돼야 한다 → 0..4 만 보인다
+	if got := v.Bars1m.Len(); got != 5 {
+		t.Fatalf("보이는 1분봉 %d개, 기대 5개 (close_time == t 인 봉은 제외)", got)
+	}
+	if last := v.Bars1m.CloseTime[v.Bars1m.Len()-1]; last >= target {
+		t.Errorf("마지막 close_time %d 가 t=%d 이상이다", last, target)
+	}
+}
