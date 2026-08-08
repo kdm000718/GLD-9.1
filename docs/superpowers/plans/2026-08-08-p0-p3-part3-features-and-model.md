@@ -323,7 +323,16 @@ func Build(v *clock.MarketView) ([]float64, bool) {
 		return nil, false
 	}
 	f := make([]float64, len(FeatureNames))
-	set := func(name string, val float64) { f[index[name]] = val }
+	// 이름을 못 찾으면 즉시 죽인다. map 의 제로값을 그대로 쓰면 오타 하나가
+	// 에러 없이 f[0](= m1_ret1)을 덮어쓴다. Python 은 dict 라 나중에
+	// FEATURE_NAMES 순회에서 KeyError 가 나지만 Go 슬라이스는 조용히 넘어간다.
+	set := func(name string, val float64) {
+		i, ok := index[name]
+		if !ok {
+			panic("알 수 없는 피처 이름: " + name)
+		}
+		f[i] = val
+	}
 
 	b1 := v.Bars1m.Last(Win1m)
 	b5 := v.Bars5m.Last(Win5m)
@@ -619,6 +628,21 @@ func itoa(i int) string {
 
 Run: `go test ./internal/features/ -v && go vet ./...`
 Expected: PASS (6개 테스트). `TestBuildIsInvariantUnderTruncation` 이 특히 중요하다.
+
+#### 피처가 누락되는 두 경로와 그 방어
+
+이름을 잘못 쓰거나 빠뜨리면 조용히 틀린 값이 나갈 수 있다. 두 경로를 구분해 둔다.
+
+**오타** — `set("m1_ret5x", …)` 처럼 없는 이름을 쓰는 경우. `set` 이 맵 조회에
+실패하면 즉시 panic 한다(Step 8 코드). 방어하지 않으면 맵의 제로값 때문에
+`f[0]`(= `m1_ret1`)이 덮여 쓰이고, 두 피처가 동시에 틀리면서 아무 에러도 안 난다.
+
+**호출 누락** — 어떤 피처에 `set` 을 아예 안 하는 경우. 그 피처는 0 으로 남는다.
+이건 panic 으로 못 잡지만 **Task 8 의 골든 대조가 잡는다**: 51개 실값 피처는
+Python 쪽이 0 이 아니므로 대조에서 즉시 어긋난다. 남은 9개(`p_*`)는 `+0분`에서
+정상값도 0 이라 누락돼도 결과가 같다 — 이 범위에서는 무해하다.
+(`p_*` 를 쓰는 `k>=1` 경로를 나중에 살릴 때는 이 보증이 사라지므로, 그때
+골든 벡터를 `k>=1` 시점으로도 뽑아야 한다.)
 
 - [ ] **Step 10: 커밋**
 
