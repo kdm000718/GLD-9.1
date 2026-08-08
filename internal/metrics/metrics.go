@@ -30,10 +30,18 @@ func ArraySplit(n, bins int) [][2]int {
 func AUC(y, p []float64) float64 {
 	var pos, neg int
 	for _, v := range y {
-		if v == 1 {
+		switch v {
+		case 1:
 			pos++
-		} else {
+		case 0:
 			neg++
+		default:
+			// 라벨이 정확히 0 또는 1 이 아니면 (NaN, Inf 등) Python 의
+			// `y == 0` 비교와 달리 조용히 neg 에 편입시키지 않는다. NaN 라벨이
+			// 섞인 채로 계산을 계속하면 그럴듯해 보이는 틀린 값이 나온다 —
+			// 확실하게 NaN 을 돌려준다. (이 값은 이 파이프라인에서 항상
+			// close>open 으로 결정되는 0/1 이라 실제로는 도달하지 않는다.)
+			return math.NaN()
 		}
 	}
 	if pos == 0 || neg == 0 {
@@ -93,6 +101,16 @@ func CalibrationTable(y, p []float64, bins int) []Bin {
 	n := len(y)
 	if n == 0 {
 		return nil
+	}
+	for _, v := range p {
+		if math.IsNaN(v) {
+			// AUC 와 동일한 이유: NaN 이 섞이면 아래 sort.SliceStable 이 조용히
+			// 깨져 구간 경계가 뒤죽박죽인 채로 그럴듯한 틀린 표를 낸다.
+			// CalibrationTable 은 공개 함수라 (Python 쪽에서는 리포트에 그대로
+			// 노출된다) 확실하게 nil 을 돌려준다. ECE 는 rows 가 비어 있으면
+			// 이미 NaN 을 반환하므로 관찰되는 동작은 그대로 유지된다.
+			return nil
+		}
 	}
 	if bins > n {
 		bins = n

@@ -84,6 +84,18 @@ func TestAUCNaNProbabilityYieldsNaN(t *testing.T) {
 	}
 }
 
+func TestAUCInvalidLabelYieldsNaN(t *testing.T) {
+	// y 는 정확히 0 또는 1 이어야 한다. `v == 1` 만 검사하고 나머지를 전부
+	// neg 로 편입시키면, NaN 라벨이 섞여도 조용히 계산이 끝나 그럴듯한 틀린
+	// 값을 낸다 (Python 의 `y == 0` 비교와 다른 지점). 라벨이 0/1 이 아니면
+	// 확실하게 NaN 을 돌려줘야 한다.
+	y := []float64{0, 1, 0, 1, math.NaN(), 1}
+	p := []float64{0.1, 0.9, 0.2, 0.8, 0.5, 0.95}
+	if got := AUC(y, p); !math.IsNaN(got) {
+		t.Errorf("NaN 라벨이 섞였는데 %v 를 돌려줬다", got)
+	}
+}
+
 func TestECEIsZeroWhenPerfectlyCalibrated(t *testing.T) {
 	// 각 묶음에서 말한 확률과 실제 빈도가 같으면 ECE 는 0 이다
 	var y, p []float64
@@ -110,16 +122,21 @@ func TestECEDetectsOverconfidence(t *testing.T) {
 func TestCalibrationTableBinning(t *testing.T) {
 	// TestECEIsZeroWhenPerfectlyCalibrated 와 TestECEDetectsOverconfidence 는
 	// p 를 고정값으로 채워서, bins 인자를 무시하고 항상 구간 1개만 만드는
-	// 구현도 통과시킨다. 여기서는 p 를 오름차순 정수로 바꿔가며(이미 정렬된
-	// 상태라 기대값 계산이 쉽다) bins=5, n=23 으로 각 구간의 N·PredLow·
-	// PredHigh·Gap 을 직접 대조한다. n%bins=3 이므로 앞 3구간이 5개씩,
-	// 뒤 2구간이 4개씩이어야 한다 (numpy array_split 규칙).
-	n := 23
+	// 구현도 통과시킨다. 여기서는 p 값을 셔플해(비정렬 입력) bins=5, n=23 으로
+	// 각 구간의 N·PredLow·PredHigh·Gap 을 직접 대조한다. n%bins=3 이므로
+	// 앞 3구간이 5개씩, 뒤 2구간이 4개씩이어야 한다 (numpy array_split 규칙).
+	// 값 집합은 여전히 0..22 라서(이미 오름차순인 경우와) 기대값은 동일하게
+	// 계산되지만, 입력 자체가 비정렬이라 내부 정렬을 통째로 빼먹은 구현은
+	// 이 순서로는 반드시 실패한다 (오름차순 입력만 쓰면 정렬이 빠져도
+	// 우연히 통과해버린다 — 실제로 재검토에서 그렇게 드러났다).
+	// perm: 0..22 를 random.seed(42) 로 섞은 순열.
+	perm := []int{16, 15, 2, 14, 5, 13, 17, 12, 22, 6, 9, 1, 19, 11, 10, 21, 4, 18, 7, 8, 0, 3, 20}
+	n := len(perm)
 	p := make([]float64, n)
 	y := make([]float64, n)
-	for i := 0; i < n; i++ {
-		p[i] = float64(i) // 이미 정렬돼 있으므로 order == 항등치환
-		if i%2 == 0 {
+	for i, v := range perm {
+		p[i] = float64(v)
+		if v%2 == 0 {
 			y[i] = 1
 		}
 	}
@@ -151,6 +168,28 @@ func TestCalibrationTableBinning(t *testing.T) {
 		if math.Abs(g.Gap-w.Gap) > 1e-12 {
 			t.Errorf("%d번째 Gap=%v, 기대 %v", i, g.Gap, w.Gap)
 		}
+	}
+}
+
+func TestCalibrationTableNaNProbabilityYieldsNil(t *testing.T) {
+	// AUC 와 같은 이유 — NaN 이 섞이면 내부 정렬이 조용히 깨져 구간 경계가
+	// 뒤죽박죽인 채로 그럴듯한 틀린 표를 낸다. CalibrationTable 은 리포트에
+	// 그대로 노출될 수 있는 공개 함수이므로 확실하게 nil 을 돌려줘야 한다.
+	y := []float64{0, 1, 0, 1, 0, 1, 0, 1}
+	p := []float64{0.9, 0.2, 0.3, 0.7, math.NaN(), 0.1, 0.8, 0.6}
+	if got := CalibrationTable(y, p, 4); got != nil {
+		t.Errorf("NaN 확률이 섞였는데 %v 를 돌려줬다", got)
+	}
+}
+
+func TestECEStaysNaNWhenProbabilityHasNaN(t *testing.T) {
+	// CalibrationTable 이 NaN 가드로 nil 을 돌려주게 되면서 ECE 의 관찰
+	// 가능한 동작(빈 표 → NaN)이 그대로 유지되는지는 가정이 아니라 직접
+	// 확인해야 한다.
+	y := []float64{0, 1, 0, 1, 0, 1, 0, 1}
+	p := []float64{0.9, 0.2, 0.3, 0.7, math.NaN(), 0.1, 0.8, 0.6}
+	if got := ECE(y, p, 4); !math.IsNaN(got) {
+		t.Errorf("NaN 확률이 섞였는데 ECE = %v 를 돌려줬다", got)
 	}
 }
 
