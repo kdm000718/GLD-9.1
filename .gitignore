@@ -1,0 +1,10 @@
+.env
+*.env
+.omc/
+data/
+cache/
+*.log
+gld91
+train
+backtest
+probe
