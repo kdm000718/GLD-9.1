@@ -287,6 +287,40 @@ func buildMatrix(b1, b5 bars.Bars) ([]int64, *model.Matrix, []float64, error) {
 			"도지 제외 %d개, 기대 5,039 — open==close 판정이 다르거나 입력 구간이 다르다", skipDoji)
 	}
 
+	// 워밍업·결측·kept 도 단언한다. 아래 네 값은 팀리드가 Python build_matrix 를
+	// (스텁이 아니라 Bars.slice 를 쓰는 진짜 구현으로) 같은 절단 구간에 독립적으로
+	// 돌려 실측한 값이다(806초 소요) — Go 자신의 출력을 되돌려 대조하는 게 아니다.
+	//
+	//   kept 932,491 / 도지 5,039 / 워밍업 37 / 결측 4,458  (합계 = 5분봉 수 942,025)
+	//
+	// 왜 필요한가: G1' 의 표본별 대조(candle_start 완전 일치, compareReference)는
+	// walkforward 가 실제로 평가한 888,525개만 본다. kept 932,491개 중 앞쪽 180일치
+	// 43,966개는 학습에만 쓰이고 평가되지 않으므로 표본별로 대조할 방법이 없다 —
+	// 그런데 전체 제외의 약 2/3 이 그 구간에서 일어난다. 워밍업·결측 판정이 그
+	// 구간에서만 Python 과 어긋나면 게이트 1~3 층을 그대로 통과하고, 5층에서도
+	// 허용치 안의 사소한 변화로만 보여 드러나지 않는다. 범위 전체에 대한 이 세
+	// 개수 단언이 그 사각지대를 닫는다.
+	//
+	// 순서: 워밍업·결측을 먼저 봐서 실패 메시지가 구체적인 규칙을 짚게 하고,
+	// kept 는 마지막에 전체 정합성 확인용으로 둔다(셋 다 맞으면 kept 도 자동으로
+	// 맞지만, 계산 실수를 잡는 이중 확인으로 남겨둔다).
+	if skipWarmup != 37 {
+		return nil, nil, nil, fmt.Errorf(
+			"워밍업 제외 %d개, 기대 37 — clock.New 의 거부(t 이전에 마감된 봉이 없는 "+
+				"데이터 시작부), Bars1m/Bars5m 길이 하한(req1m=%d, req5m=%d), "+
+				"features.Build 의 거부 중 하나가 Python 과 다르다", skipWarmup, req1m, req5m)
+	}
+	if skipGap != 4_458 {
+		return nil, nil, nil, fmt.Errorf(
+			"결측 제외 %d개, 기대 4,458 — 연속성 조건 세 가지(1분봉 마지막 시각이 "+
+				"t-1분인지, 최근 %d개 1분봉이 끊김없이 이어지는지, 최근 %d개 5분봉이 "+
+				"끊김없이 이어지는지) 중 하나가 Python 과 다르다", skipGap, req1m, req5m)
+	}
+	if kept != 932_491 {
+		return nil, nil, nil, fmt.Errorf(
+			"유지 표본 %d개, 기대 932,491 — 도지/워밍업/결측 판정 중 하나가 Python 과 다르다", kept)
+	}
+
 	mat.Truncate(kept)
 	return cs[:kept], mat, y[:kept], nil
 }
