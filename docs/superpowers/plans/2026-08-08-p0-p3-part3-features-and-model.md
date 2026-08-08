@@ -1837,14 +1837,25 @@ func truncateTo(b bars.Bars, endMS int64) bars.Bars {
 		return fmt.Errorf("-end 파싱 실패: %w", err)
 	}
 	endMS := end.UnixMilli()
-	b1 = truncateTo(b1, endMS)
+	// 경계는 타임프레임마다 다르다. -end 는 마지막 5분봉의 '시작' 시각이므로
+	// 5분봉은 그대로 자르고, 1분봉은 그 봉을 구성하는 마지막 분(+4분)까지 남긴다.
+	// 같은 경계를 두 곳에 쓰면 1분봉이 정확히 4개 모자란다 (실측 확인).
+	b1 = truncateTo(b1, endMS+4*60_000)
 	b5 = truncateTo(b5, endMS)
 	fmt.Printf("  절단 후 1분봉 %d / 5분봉 %d  (기준 %s)\n", b1.Len(), b5.Len(), endFlag)
+	if b1.Len() != 4_710_079 || b5.Len() != 942_025 {
+		return fmt.Errorf("절단 후 봉 수가 Python 참조와 다르다: 1분봉 %d(기대 4710079) / 5분봉 %d(기대 942025)",
+			b1.Len(), b5.Len())
+	}
 ```
 
 절단 후 봉 수가 Python 참조(1분봉 4,710,079 / 5분봉 942,025)와 맞는지 먼저 확인하고,
 어긋나면 표본 생성으로 넘어가기 전에 멈춘다. 여기서 안 맞으면 뒤의 어떤 수치도 비교할
 의미가 없다.
+
+**이 절단은 이미 실측 검증했다.** 받아둔 캐시에 위 경계를 적용하면 1분봉 4,710,079 /
+5분봉 942,025 로 Python 참조와 정확히 일치한다. 두 타임프레임에 같은 경계를 쓰면
+1분봉이 23:56~23:59 네 개만큼 모자라므로, `+4*60_000` 을 빼먹지 말 것.
 
 **Files:**
 - Create: `cmd/backtest/main.go`
