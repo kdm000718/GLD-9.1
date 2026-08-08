@@ -39,6 +39,16 @@ func AUC(y, p []float64) float64 {
 	if pos == 0 || neg == 0 {
 		return math.NaN()
 	}
+	for _, v := range p {
+		if math.IsNaN(v) {
+			// NaN 이 섞이면 아래 sort.SliceStable 의 비교 함수(<)가 엄격 약순서를
+			// 보장하지 못해 정렬이 조용히 깨지고, 그럴듯해 보이는 틀린 값을
+			// 돌려준다 — 셔플된 입력이 아니면 드러나지 않는다. numpy 는 NaN 을
+			// 끝으로 보내 결정적이지만 그 자체로 무의미한 값을 내는데, 여기서는
+			// 그 대신 확실하게 NaN 을 돌려준다.
+			return math.NaN()
+		}
+	}
 	order := make([]int, len(p))
 	for i := range order {
 		order[i] = i
