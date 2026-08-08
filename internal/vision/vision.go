@@ -247,7 +247,23 @@ func LoadFullHistory(ctx context.Context, symbol, interval, cacheDir string, log
 	// 안정 정렬 후 open_time 중복 제거 (먼저 나온 것을 남긴다)
 	sortRows(chunks)
 	dedup := dedupRows(chunks)
-	return toBars(dedup), nil
+	out := toBars(dedup)
+
+	// close_time 이상 스캔 — 보고만 하고 데이터는 그대로 둔다.
+	// clock.cut 의 이진탐색이 close_time 단조성을 전제하므로, 실행할 때마다
+	// 그 전제가 깨지는 지점을 드러낸다.
+	if an := bars.FindAnomalies(out); len(an) > 0 {
+		log("    [주의] 타임스탬프 이상 %d건 — 데이터는 그대로 둔다", len(an))
+		for i, a := range an {
+			if i >= 5 {
+				log("    ... 외 %d건", len(an)-5)
+				break
+			}
+			log("      idx %d %s: %s", a.Index, a.Kind, a.Msg)
+		}
+	}
+
+	return out, nil
 }
 
 func sortRows(rows [][11]float64) {
