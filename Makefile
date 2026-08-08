@@ -24,8 +24,13 @@ goldencheck:
 backtest:
 	go run ./cmd/backtest
 
-# G2 게이트. 기본 7일 — 2,669 회차로 불일치율 표준오차 0.49%p 라 판정에 충분하고,
-# 수집기를 멈춰야 하는 시간이 짧다. 더 긴 구간은 `make align DAYS=30`.
+# G2 게이트. 5분 상품만 대상으로 정산 방향과 바이낸스 5분봉 방향을 대조한다.
+# 기본 7일 — 슬롯 2,015개(비교 1,996)로 표준오차 0.12%p 라 판정에 충분하고,
+# 수집기를 멈춰야 하는 시간이 짧다. 더 긴 구간은 `make align DAYS=30`
+# (실측 d=0.3264% ±0.0616%p 로 7일치와 정합).
+#
+# PREDICT_API_KEY 가 필요하다. 값이 명령줄에 남지 않게 파일에서 읽을 것:
+#   set -a; . ~/.config/predictfun/env; set +a; make align
 DAYS ?= 7
 
 align:

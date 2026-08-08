@@ -199,7 +199,10 @@ func TestFetchResolvedRoundsStopsAtMaxPages(t *testing.T) {
 	}
 }
 
-// 페이지가 겹쳐서 같은 회차를 돌려주면 표본 수가 부풀려진다 (G2 의 n=2,669 가 그랬다).
+// 페이지가 겹쳐서 같은 회차를 돌려주면 표본 수가 부풀려진다.
+// G2 의 n=2,669 는 이것이 아니라 15분 상품 혼입이 원인이었다
+// (TestParseSlugStartRejectsOtherTimeframes 참고). 겹침 자체는 아직 실측된 적이
+// 없지만, 커서 페이지네이션에서 값싸게 막을 수 있으므로 그대로 둔다.
 func TestFetchResolvedRoundsDeduplicatesSlugs(t *testing.T) {
 	pages := []string{
 		`{"success":true,"cursor":"P2","data":[
