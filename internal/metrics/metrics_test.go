@@ -193,6 +193,38 @@ func TestECEStaysNaNWhenProbabilityHasNaN(t *testing.T) {
 	}
 }
 
+// 길이가 어긋나면 p 가 길 때는 조용히 앞부분만 쓰고 짧을 때는 패닉한다.
+// 어느 쪽도 정답이 아니다 — NaN / nil 로 확실하게 거부한다.
+func TestMismatchedLengthsAreRejected(t *testing.T) {
+	y := []float64{0, 1, 0, 1}
+
+	t.Run("AUC/p가 김", func(t *testing.T) {
+		if got := AUC(y, []float64{0.1, 0.9, 0.2, 0.8, 0.5}); !math.IsNaN(got) {
+			t.Errorf("AUC = %v, NaN 이어야 한다", got)
+		}
+	})
+	t.Run("AUC/p가 짧음", func(t *testing.T) {
+		if got := AUC(y, []float64{0.1, 0.9}); !math.IsNaN(got) {
+			t.Errorf("AUC = %v, NaN 이어야 한다", got)
+		}
+	})
+	t.Run("CalibrationTable/p가 김", func(t *testing.T) {
+		if got := CalibrationTable(y, []float64{0.1, 0.9, 0.2, 0.8, 0.5}, 2); got != nil {
+			t.Errorf("CalibrationTable = %v, nil 이어야 한다", got)
+		}
+	})
+	t.Run("CalibrationTable/p가 짧음", func(t *testing.T) {
+		if got := CalibrationTable(y, []float64{0.1, 0.9}, 2); got != nil {
+			t.Errorf("CalibrationTable = %v, nil 이어야 한다", got)
+		}
+	})
+	t.Run("ECE", func(t *testing.T) {
+		if got := ECE(y, []float64{0.1, 0.9, 0.2, 0.8, 0.5}, 2); !math.IsNaN(got) {
+			t.Errorf("ECE = %v, NaN 이어야 한다", got)
+		}
+	})
+}
+
 func TestBinomTestNormalBounds(t *testing.T) {
 	if got := BinomTestNormal(500, 1000); got < 0.9 {
 		t.Errorf("정확히 반이면 p 가 1 에 가까워야 한다: %v", got)

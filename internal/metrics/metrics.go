@@ -28,6 +28,11 @@ func ArraySplit(n, bins int) [][2]int {
 
 // AUC 는 Mann-Whitney U 기반 ROC AUC 다. 동점은 평균 순위로 처리한다.
 func AUC(y, p []float64) float64 {
+	if len(y) != len(p) {
+		// p 가 길면 조용히 앞부분만 쓰고, 짧으면 ranks 인덱싱에서 패닉한다.
+		// 둘 다 그럴듯해 보이는 틀린 값 또는 엉뚱한 지점의 죽음이므로 NaN 을 돌려준다.
+		return math.NaN()
+	}
 	var pos, neg int
 	for _, v := range y {
 		switch v {
@@ -100,6 +105,11 @@ type Bin struct {
 func CalibrationTable(y, p []float64, bins int) []Bin {
 	n := len(y)
 	if n == 0 {
+		return nil
+	}
+	if len(p) != n {
+		// AUC 와 같은 이유. NaN 혼입 때와 동일하게 nil 을 돌려준다 —
+		// ECE 는 rows 가 비면 NaN 이므로 관찰되는 동작이 일관된다.
 		return nil
 	}
 	for _, v := range p {
