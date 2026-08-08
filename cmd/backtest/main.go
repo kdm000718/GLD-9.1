@@ -3,7 +3,9 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"math"
@@ -187,6 +189,9 @@ func run(symbol, cache string, trainDays, refitDays, l2 float64, endFlag string)
 		fmt.Printf("\n  ■ %v\n", refErr)
 		pass = false
 	} else {
+		// 참조 파일의 정체를 로그에 남긴다 — 6개월 뒤 재현하는 사람이 같은 파일을
+		// 대조했는지 확인할 방법이 이것 말고는 없다(파일 자체는 gitignore 됨).
+		fmt.Printf("  참조 파일 %s  SHA256 %s  n=%d\n", refPath, ref.SHA256, len(ref.CS))
 		if !checkMetricsOnReference(ref) {
 			pass = false
 		}
@@ -289,9 +294,10 @@ func buildMatrix(b1, b5 bars.Bars) ([]int64, *model.Matrix, []float64, error) {
 // refPredictions 는 Python 참조 실행의 표본별 예측이다.
 // tools/export_py_predictions.py 가 만든다.
 type refPredictions struct {
-	CS    []int64
-	Prob  []float64
-	Label []int8
+	CS     []int64
+	Prob   []float64
+	Label  []int8
+	SHA256 string // 원본 파일 전체의 해시. 로그에 남겨 참조 파일의 정체를 확인할 수 있게 한다.
 }
 
 const refMagic = "GLD9PRED"
@@ -314,10 +320,12 @@ func loadReference(path string) (*refPredictions, error) {
 	if len(raw) != want {
 		return nil, fmt.Errorf("참조 예측 크기가 맞지 않는다: %d 바이트, 기대 %d", len(raw), want)
 	}
+	sum := sha256.Sum256(raw)
 	r := &refPredictions{
-		CS:    make([]int64, n),
-		Prob:  make([]float64, n),
-		Label: make([]int8, n),
+		CS:     make([]int64, n),
+		Prob:   make([]float64, n),
+		Label:  make([]int8, n),
+		SHA256: hex.EncodeToString(sum[:]),
 	}
 	off := 16
 	for i := 0; i < n; i++ {
@@ -325,11 +333,22 @@ func loadReference(path string) (*refPredictions, error) {
 	}
 	off += n * 8
 	for i := 0; i < n; i++ {
-		r.Prob[i] = math.Float64frombits(binary.LittleEndian.Uint64(raw[off+i*8:]))
+		v := math.Float64frombits(binary.LittleEndian.Uint64(raw[off+i*8:]))
+		// NaN/Inf 가 섞이면 metrics.AUC·ECE 가 설계대로 NaN 을 돌려주는데, 아래
+		// 판정 코드가 NaN 과 비교하면 "차이 없음"으로 오독한다(Go 에서 NaN > tol
+		// 은 항상 false). 검증이 무력화되기 전에 여기서 막는다.
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return nil, fmt.Errorf("참조 예측 확률이 유한하지 않다: idx=%d 값=%v", i, v)
+		}
+		r.Prob[i] = v
 	}
 	off += n * 8
 	for i := 0; i < n; i++ {
-		r.Label[i] = int8(raw[off+i])
+		l := int8(raw[off+i])
+		if l != 0 && l != 1 {
+			return nil, fmt.Errorf("참조 라벨이 0/1 이 아니다: idx=%d 값=%d", i, l)
+		}
+		r.Label[i] = l
 	}
 	return r, nil
 }
@@ -372,7 +391,9 @@ func checkMetricsOnReference(ref *refPredictions) bool {
 	chk := func(name string, got, want float64) {
 		d := math.Abs(got - want)
 		mark := "통과"
-		if d > tol {
+		// d > tol 로 쓰면 d 가 NaN 일 때 (Go 에서 NaN 과의 비교는 항상 false 이므로)
+		// 조용히 통과로 읽힌다. !(d <= tol) 은 NaN 을 실패로 잡는다.
+		if !(d <= tol) {
 			mark, ok = "실패", false
 		}
 		fmt.Printf("  %-8s go=%.16f  py=%.16f  차이 %.3e  %s\n", name, got, want, d, mark)
@@ -392,7 +413,7 @@ func checkMetricsOnReference(ref *refPredictions) bool {
 // 기본 ftol 때문에 |g|max 0.57~1.04 에서 멈추는데 Go 는 최적점까지 간다.
 // 그 차이가 만드는 폭이 아래 실측값이고, 허용치는 거기에 여유를 둔 것이다.
 //
-//	max|Δp|   실측 1.2e-3  → 허용 0.01   (8배)
+//	max|Δp|   실측 4.253e-3 → 허용 0.01  (2.35배, 9년 전 구간 실측)
 //	중앙값    실측 4.3e-5  → 허용 1e-3   (23배)
 //	뒤집힘    실측 0.055%  → 허용 0.5%   (9배)
 //
@@ -446,7 +467,9 @@ func compareReference(ref *refPredictions, ecs []int64, ey, ep []float64) bool {
 	ok := true
 	chk := func(name string, got, tol float64) {
 		mark := "통과"
-		if got > tol {
+		// got > tol 로 쓰면 got 이 NaN 일 때 조용히 통과로 읽힌다(Go 의 NaN 비교는
+		// 항상 false). !(got <= tol) 로 뒤집어야 NaN 을 실패로 잡는다.
+		if !(got <= tol) {
 			mark, ok = "실패", false
 		}
 		fmt.Printf("  %-12s %.3e  (허용 %.3e)  %s\n", name, got, tol, mark)
@@ -456,7 +479,7 @@ func compareReference(ref *refPredictions, ecs []int64, ey, ep []float64) bool {
 	fmt.Printf("  %-12s %.3e  (참고)\n", "99.9%|Δp|", d[i999])
 
 	mark := "통과"
-	if flipRate > 0.005 {
+	if !(flipRate <= 0.005) {
 		mark, ok = "실패", false
 	}
 	fmt.Printf("  %-12s %d개 = %.4f%%  (허용 0.5000%%)  %s\n",
