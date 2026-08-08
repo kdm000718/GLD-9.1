@@ -97,7 +97,9 @@ func TestPartialFeaturesAreZeroAtElapsedZero(t *testing.T) {
 // 이 패키지 전체의 존재 이유: 절단해도 같은 값이 나와야 한다.
 func TestBuildIsInvariantUnderTruncation(t *testing.T) {
 	b1, b5 := synth(2000, 60_000, 17), synth(400, 300_000, 18)
-	for _, ci := range []int{200, 300, 380} {
+	cis := []int{200, 300, 380}
+	compared := 0
+	for _, ci := range cis {
 		cs := int64(ci) * 300_000
 		full, _ := clock.New(cs, b1, b5, cs)
 		a, ok1 := Build(full)
@@ -119,13 +121,20 @@ func TestBuildIsInvariantUnderTruncation(t *testing.T) {
 		if ok1 != ok2 {
 			t.Fatalf("ci=%d: ok 가 다르다 %v vs %v", ci, ok1, ok2)
 		}
+		// 양쪽이 다 거부하면 비교를 한 건도 하지 않고 통과해 버린다. 세 ci 는 전부
+		// 워밍업이 충분한 고정 합성 데이터이므로 거부는 그 자체로 회귀다.
 		if !ok1 {
-			continue
+			t.Fatalf("ci=%d: Build 가 양쪽 다 거부했다 — 워밍업이 충분한데", ci)
 		}
+		compared++
 		for i := range a {
 			if a[i] != bb[i] {
 				t.Fatalf("ci=%d %s: %v vs %v — 피처가 미래를 본다", ci, FeatureNames[i], a[i], bb[i])
 			}
 		}
+	}
+	// 이 테스트가 공허하게 통과하지 않았음을 남긴다.
+	if compared != len(cis) {
+		t.Fatalf("비교한 시점 %d개, 기대 %d개 — 비교를 건너뛰었다", compared, len(cis))
 	}
 }
