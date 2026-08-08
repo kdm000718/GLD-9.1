@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -17,7 +18,7 @@ func TestParseSlugStart(t *testing.T) {
 	}{
 		{"btc-updown-5m-1786190100", 1786190100, true},
 		{"eth-updown-5m-1786192500", 1786192500, true},
-		{"btc-updown-15m-1786190100", 1786190100, true},
+		{"btc-updown-15m-1786190100", 0, false}, // 15분 상품은 우리 상품이 아니다
 		{"btc-updown-5m-notanumber", 0, false},
 		{"", 0, false},
 	}
@@ -33,6 +34,69 @@ func TestParseSlugStartRejectsUnaligned(t *testing.T) {
 	// 5분 경계가 아닌 값은 회차 슬러그일 수 없다
 	if _, ok := ParseSlugStart("btc-updown-5m-1786190123"); ok {
 		t.Error("5분 경계가 아닌 슬러그를 받아들였다")
+	}
+}
+
+// 타임프레임을 나눗셈으로 추론하면 15분 상품이 통과한다 — 모든 15분 경계는
+// 5분 경계이기도 하기 때문이다. 그렇게 들어온 회차는 15분치 가격 변동을
+// 5분봉과 비교하게 되고, 5분 회차와 같은 슬롯을 차지한다.
+// G2 로 발표된 앞의 두 숫자가 이 경로로 오염됐다.
+func TestParseSlugStartRejectsOtherTimeframes(t *testing.T) {
+	// 1786212900 = 15분 경계이면서 5분 경계 (%300 == 0, %900 == 0)
+	const at15m = 1786212900
+	if at15m%300 != 0 {
+		t.Fatalf("전제가 틀렸다: %d 는 5분 경계가 아니다", at15m)
+	}
+
+	for _, slug := range []string{
+		"btc-updown-15m-1786212900",
+		"btc-updown-1h-1786212900",
+		"btc-updown-30m-1786212900",
+		"eth-updown-15m-1786212900",
+	} {
+		if got, ok := ParseSlugStart(slug); ok {
+			t.Errorf("ParseSlugStart(%q) = (%d, true) — 5분 상품이 아닌데 받아들였다", slug, got)
+		}
+	}
+
+	// 같은 시각의 5분 상품은 통과해야 한다. 시각이 아니라 상품으로 거른다는 뜻이다.
+	if got, ok := ParseSlugStart("btc-updown-5m-1786212900"); !ok || got != at15m {
+		t.Errorf("같은 시각의 5분 회차를 거부했다: (%d, %v)", got, ok)
+	}
+}
+
+// 수집 단계에서 다른 타임프레임이 아예 들어오지 않아야 한다.
+func TestFetchResolvedRoundsKeepsOnlyFiveMinute(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"success":true,"cursor":null,"data":[
+		  {"slug":"btc-updown-5m-1786212900","status":"RESOLVED",
+		   "variantData":{"startPrice":"100","endPrice":"101","priceFeedSymbol":"BTCUSDT"}},
+		  {"slug":"btc-updown-15m-1786212900","status":"RESOLVED",
+		   "variantData":{"startPrice":"100","endPrice":"105","priceFeedSymbol":"BTCUSDT"}},
+		  {"slug":"btc-updown-5m-1786213200","status":"RESOLVED",
+		   "variantData":{"startPrice":"101","endPrice":"100","priceFeedSymbol":"BTCUSDT"}}
+		]}`))
+	}))
+	defer srv.Close()
+
+	c := New("k")
+	c.BaseURL = srv.URL
+	got, err := FetchResolvedRounds(context.Background(), c, "btc", 0)
+	if err != nil {
+		t.Fatalf("FetchResolvedRounds: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("회차 %d개, 기대 2개 — 15분 상품이 섞여 들어왔다: %+v", len(got), got)
+	}
+	seen := map[int64]bool{}
+	for _, r := range got {
+		if !strings.Contains(r.Slug, "-"+Timeframe+"-") {
+			t.Errorf("5분 상품이 아닌 회차가 남았다: %s", r.Slug)
+		}
+		if seen[r.StartUnix] {
+			t.Errorf("슬롯 %d 가 중복이다 — 5분만 남으면 슬롯은 유일해야 한다", r.StartUnix)
+		}
+		seen[r.StartUnix] = true
 	}
 }
 

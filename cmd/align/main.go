@@ -63,16 +63,42 @@ func run(key string, days int, symbol, prefix string) error {
 		return fmt.Errorf("비교 가능한 회차가 없습니다")
 	}
 
+	// 구간 안의 5분 슬롯 이론값. 수집 회차가 이 값을 넘으면 5분 아닌 상품이
+	// 섞인 것이다 — 그것이 정확히 앞의 두 숫자를 오염시킨 경로다.
+	slots := (hi-lo)/300 + 1
+
 	d := float64(st.disagree) / float64(st.n)
 	se := math.Sqrt(d * (1 - d) / float64(st.n))
 	fmt.Println()
 	fmt.Println("==================== G2 정산 정합 ====================")
+	fmt.Println("  측정 기준")
+	fmt.Printf("    타임프레임    : %s-updown-%s-* 만 (15m 등 다른 상품 제외)\n", prefix, rest.Timeframe)
+	fmt.Printf("    구간          : %s ~ %s  (최근 %d일)\n", iso(lo), iso(hi), days)
+	fmt.Printf("    5분 슬롯      : 이론값 %d개 / 수집 회차 %d개 / 바이낸스 봉 %d개\n",
+		slots, len(rounds), len(ks))
+	fmt.Printf("    슬롯 충돌     : %d개  (그중 방향이 서로 다른 슬롯 %d개)\n", st.dupSlot, st.dupConflict)
+	fmt.Println()
 	fmt.Printf("  비교 슬롯     : %d개  (봉 결측 %d, chainlink 무변동 %d, 바이낸스 도지 %d)\n",
 		st.n, st.missing, st.chainFlat, st.binFlat)
-	fmt.Printf("  중복 슬롯 제외: %d개  (그중 방향이 서로 다른 슬롯 %d개)\n", st.dupSlot, st.dupConflict)
 	fmt.Printf("  불일치        : %d개\n", st.disagree)
 	fmt.Printf("  불일치율 d    : %.4f%%  ±%.4f%%p (1SE)\n", d*100, se*100)
 	fmt.Println()
+
+	if st.dupSlot > 0 {
+		// 5분 상품만 남긴 뒤로 슬롯 충돌은 일어나지 않아야 한다. 일어났다면
+		// 전제가 깨진 것이므로 조용히 넘기지 않는다 — 앞의 두 숫자가 바로
+		// 이 충돌을 아무도 보지 않은 채로 발표됐다.
+		fmt.Printf("  !!!!! 경고 — 5분 상품만 남겼는데도 슬롯 충돌이 %d건 있다 !!!!!\n", st.dupSlot)
+		fmt.Println("        한 슬롯에 회차가 둘 이상이면 이 표본은 신뢰할 수 없다.")
+		fmt.Println("        아래 예시의 슬러그를 확인할 것:")
+		for _, s := range st.dupSample {
+			fmt.Printf("          %s\n", s)
+		}
+		if st.dupSlot > len(st.dupSample) {
+			fmt.Printf("          ... 외 %d건\n", st.dupSlot-len(st.dupSample))
+		}
+		fmt.Println()
+	}
 
 	const baseEdge = 2.270  // %p — 문턱 0.0172 실측 52.270%
 	const dojiBias = -0.282 // %p — 도지 제외 낙관 편향
@@ -105,30 +131,45 @@ type stats struct {
 	missing     int
 	dupSlot     int
 	dupConflict int
+	dupSample   []string // 충돌한 슬러그 예시 (최대 dupSampleMax 쌍)
 }
+
+// dupSampleMax 는 경고에 찍을 슬롯 충돌 예시의 최대 개수다.
+const dupSampleMax = 5
 
 // compare 는 회차를 5분 슬롯에 붙여 방향 불일치를 센다.
 //
-// 한 슬롯을 두 번 세면 안 된다. rest.FetchResolvedRounds 가 슬러그 기준으로는 이미
-// 걸렀지만, 같은 슬롯에 마켓이 여럿이면 슬러그가 달라 그 필터를 통과한다. 그것을
-// 독립 표본으로 세면 n 이 봉 개수를 넘고(7일 구간에서 슬롯 2,015개에 n=2,669 가
-// 그랬다) 표준오차가 과소평가된다. rounds 는 최신순이므로 먼저 온 것(가장 최근
-// 게시)을 남긴다.
+// 슬롯 충돌은 이제 정상 경로에 없어야 한다. rest 가 슬러그 중복과 타임프레임을
+// 둘 다 거르므로, 5분 상품 하나가 한 슬롯을 차지한다. 그래도 세고 예시를
+// 남기는 이유는 이것이 조용히 틀리는 방식으로 이미 두 번 당했기 때문이다 —
+// 15분 상품이 섞여 들어와 슬롯을 공유했고, n 이 5분 슬롯 수를 넘는데도 아무도
+// 알아채지 못했다. 충돌이 하나라도 나오면 호출부가 크게 경고한다.
+//
+// 충돌 시에는 최신순 첫 회차를 남긴다 — 세는 것을 멈추지 않되, 그 표본이
+// 의심스럽다는 사실이 로그에 남아야 한다.
 func compare(rounds []rest.Round, byOpen map[int64]klines.Kline) stats {
 	var st stats
-	usedSlot := make(map[int64]int, len(rounds))
+	type kept struct {
+		slug string
+		dir  int
+	}
+	usedSlot := make(map[int64]kept, len(rounds))
 	for _, r := range rounds {
 		chainUp := sign(r.EndPrice - r.StartPrice)
 		if prev, ok := usedSlot[r.StartUnix]; ok {
 			st.dupSlot++
-			if prev != chainUp {
-				// 같은 슬롯의 두 마켓이 서로 다른 방향으로 정산됐다는 뜻이다.
-				// 단순 중복 반환이 아니라 실제로 다른 마켓이라는 신호.
+			if prev.dir != chainUp {
+				// 같은 슬롯의 두 회차가 서로 다른 방향으로 정산됐다.
+				// 같은 사건의 중복 반환이 아니라 서로 다른 사건이라는 신호다.
 				st.dupConflict++
+			}
+			if len(st.dupSample) < dupSampleMax {
+				st.dupSample = append(st.dupSample,
+					fmt.Sprintf("%s: %s (채택) vs %s (버림)", iso(r.StartUnix), prev.slug, r.Slug))
 			}
 			continue
 		}
-		usedSlot[r.StartUnix] = chainUp
+		usedSlot[r.StartUnix] = kept{slug: r.Slug, dir: chainUp}
 
 		k, ok := byOpen[r.StartUnix]
 		if !ok {
