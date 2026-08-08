@@ -1809,6 +1809,43 @@ Go 파이프라인 전체를 2017-08-17~ 전 구간에 돌려 Python 이 낸 숫
 Python 참조값 (`out_full/summary_full.json`):
 정확도 **52.773%**, AUC **0.5408**, ECE **0.0080**, n **888,525**, 재학습 **104회**.
 
+### 먼저: 입력 구간을 Python 실행과 맞춰야 한다
+
+`vision.LoadFullHistory` 는 **실행일 기준 "어제까지"** 를 받는다. Python 참조 실행은
+2026-08-06 까지였으므로, 오늘 Go 를 돌리면 데이터가 더 많아 표본 수가 반드시 어긋난다.
+실측으로 확인된 차이다 — Go 가 받은 5분봉 942,313 봉 vs Python 942,025 봉, 차이 288 =
+정확히 하루치.
+
+**n 의 완전 일치는 입력이 같을 때만 성립하는 기준이다.** 이 절단을 빠뜨리면 게이트가
+반드시 실패하고, 그 실패를 "포팅 오류" 로 오독하게 된다. `cmd/backtest` 의 `-end`
+플래그가 그 역할을 하며 기본값은 Python 참조 실행의 마지막 5분봉 시작 시각이다.
+
+`run` 안에서 `b1`·`b5` 를 로드한 직후, 아래 truncate 를 적용한 뒤 `buildMatrix` 를
+호출한다. `sort` 를 import 에 추가한다.
+
+```go
+// truncateTo 는 open_time 이 endMS 를 넘는 봉을 잘라낸다.
+func truncateTo(b bars.Bars, endMS int64) bars.Bars {
+	hi := sort.Search(b.Len(), func(i int) bool { return b.OpenTime[i] > endMS })
+	return b.Slice(0, hi)
+}
+```
+
+```go
+	end, err := time.Parse(time.RFC3339, endFlag)
+	if err != nil {
+		return fmt.Errorf("-end 파싱 실패: %w", err)
+	}
+	endMS := end.UnixMilli()
+	b1 = truncateTo(b1, endMS)
+	b5 = truncateTo(b5, endMS)
+	fmt.Printf("  절단 후 1분봉 %d / 5분봉 %d  (기준 %s)\n", b1.Len(), b5.Len(), endFlag)
+```
+
+절단 후 봉 수가 Python 참조(1분봉 4,710,079 / 5분봉 942,025)와 맞는지 먼저 확인하고,
+어긋나면 표본 생성으로 넘어가기 전에 멈춘다. 여기서 안 맞으면 뒤의 어떤 수치도 비교할
+의미가 없다.
+
 **Files:**
 - Create: `cmd/backtest/main.go`
 - Create: `docs/results/g1prime-fullhistory.log` (실행 결과)
@@ -1854,15 +1891,18 @@ func main() {
 	trainDays := flag.Float64("train-days", 180, "학습 창 (일)")
 	refitDays := flag.Float64("refit-days", 30, "재학습 주기 (일)")
 	l2 := flag.Float64("l2", 10, "L2 세기")
+	// Python 참조 실행과 입력을 맞추기 위한 절단 기준. 이것 없이는 실행일에 따라
+	// 데이터가 늘어나 표본 수가 어긋난다.
+	endFlag := flag.String("end", "2026-08-06T23:55:00Z", "마지막 5분봉 시작 시각 (RFC3339)")
 	flag.Parse()
 
-	if err := run(*symbol, *cache, *trainDays, *refitDays, *l2); err != nil {
+	if err := run(*symbol, *cache, *trainDays, *refitDays, *l2, *endFlag); err != nil {
 		fmt.Fprintln(os.Stderr, "실패:", err)
 		os.Exit(1)
 	}
 }
 
-func run(symbol, cache string, trainDays, refitDays, l2 float64) error {
+func run(symbol, cache string, trainDays, refitDays, l2 float64, endFlag string) error {
 	ctx := context.Background()
 	t0 := time.Now()
 
