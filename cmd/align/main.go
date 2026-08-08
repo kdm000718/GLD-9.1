@@ -58,40 +58,19 @@ func run(key string, days int, symbol, prefix string) error {
 	}
 	fmt.Printf("  봉 %d개\n", len(ks))
 
-	var n, disagree, chainFlat, binFlat, missing int
-	for _, r := range rounds {
-		k, ok := byOpen[r.StartUnix]
-		if !ok {
-			missing++
-			continue
-		}
-		chainUp := sign(r.EndPrice - r.StartPrice)
-		binUp := sign(k.Close - k.Open)
-		if chainUp == 0 {
-			chainFlat++
-		}
-		if binUp == 0 {
-			binFlat++
-		}
-		if chainUp == 0 || binUp == 0 {
-			continue // 도지·무변동은 방향 비교 대상이 아니다
-		}
-		n++
-		if chainUp != binUp {
-			disagree++
-		}
-	}
-	if n == 0 {
+	st := compare(rounds, byOpen)
+	if st.n == 0 {
 		return fmt.Errorf("비교 가능한 회차가 없습니다")
 	}
 
-	d := float64(disagree) / float64(n)
-	se := math.Sqrt(d * (1 - d) / float64(n))
+	d := float64(st.disagree) / float64(st.n)
+	se := math.Sqrt(d * (1 - d) / float64(st.n))
 	fmt.Println()
 	fmt.Println("==================== G2 정산 정합 ====================")
-	fmt.Printf("  비교 회차     : %d개  (봉 결측 %d, chainlink 무변동 %d, 바이낸스 도지 %d)\n",
-		n, missing, chainFlat, binFlat)
-	fmt.Printf("  불일치        : %d개\n", disagree)
+	fmt.Printf("  비교 슬롯     : %d개  (봉 결측 %d, chainlink 무변동 %d, 바이낸스 도지 %d)\n",
+		st.n, st.missing, st.chainFlat, st.binFlat)
+	fmt.Printf("  중복 슬롯 제외: %d개  (그중 방향이 서로 다른 슬롯 %d개)\n", st.dupSlot, st.dupConflict)
+	fmt.Printf("  불일치        : %d개\n", st.disagree)
 	fmt.Printf("  불일치율 d    : %.4f%%  ±%.4f%%p (1SE)\n", d*100, se*100)
 	fmt.Println()
 
@@ -115,6 +94,63 @@ func run(key string, days int, symbol, prefix string) error {
 	}
 	fmt.Println("  판정: 통과 — 다음 단계로 간다.")
 	return nil
+}
+
+// stats 는 회차·봉 대조 결과다.
+type stats struct {
+	n           int // 방향을 실제로 비교한 슬롯 수 — 이 값이 표준오차의 분모다
+	disagree    int
+	chainFlat   int
+	binFlat     int
+	missing     int
+	dupSlot     int
+	dupConflict int
+}
+
+// compare 는 회차를 5분 슬롯에 붙여 방향 불일치를 센다.
+//
+// 한 슬롯을 두 번 세면 안 된다. rest.FetchResolvedRounds 가 슬러그 기준으로는 이미
+// 걸렀지만, 같은 슬롯에 마켓이 여럿이면 슬러그가 달라 그 필터를 통과한다. 그것을
+// 독립 표본으로 세면 n 이 봉 개수를 넘고(7일 구간에서 슬롯 2,015개에 n=2,669 가
+// 그랬다) 표준오차가 과소평가된다. rounds 는 최신순이므로 먼저 온 것(가장 최근
+// 게시)을 남긴다.
+func compare(rounds []rest.Round, byOpen map[int64]klines.Kline) stats {
+	var st stats
+	usedSlot := make(map[int64]int, len(rounds))
+	for _, r := range rounds {
+		chainUp := sign(r.EndPrice - r.StartPrice)
+		if prev, ok := usedSlot[r.StartUnix]; ok {
+			st.dupSlot++
+			if prev != chainUp {
+				// 같은 슬롯의 두 마켓이 서로 다른 방향으로 정산됐다는 뜻이다.
+				// 단순 중복 반환이 아니라 실제로 다른 마켓이라는 신호.
+				st.dupConflict++
+			}
+			continue
+		}
+		usedSlot[r.StartUnix] = chainUp
+
+		k, ok := byOpen[r.StartUnix]
+		if !ok {
+			st.missing++
+			continue
+		}
+		binUp := sign(k.Close - k.Open)
+		if chainUp == 0 {
+			st.chainFlat++
+		}
+		if binUp == 0 {
+			st.binFlat++
+		}
+		if chainUp == 0 || binUp == 0 {
+			continue // 도지·무변동은 방향 비교 대상이 아니다
+		}
+		st.n++
+		if chainUp != binUp {
+			st.disagree++
+		}
+	}
+	return st
 }
 
 func sign(x float64) int {

@@ -48,13 +48,29 @@ type categoryPage struct {
 	} `json:"data"`
 }
 
+// maxPages 는 커서 페이지네이션의 상한이다. 50건/페이지 × 2,000 = 10만 회차로
+// 실제 조회 구간(30일 ≈ 8,600 회차/심볼)을 크게 넘는다. 정상 경로에서는 절대
+// 닿지 않고, 베타 API 가 종료 조건 네 개를 전부 어겼을 때만 여기서 멈춘다.
+//
+// const 가 아니라 var 인 이유는 하나뿐이다 — 상한 자체를 시험하려면 2,000 페이지를
+// 3 req/s 로 받아야 해서(11분) 테스트가 값을 낮춰야 한다. 프로덕션 코드는 쓰지 않는다.
+var maxPages = 2000
+
 // FetchResolvedRounds 는 정산된 CRYPTO_UP_DOWN 회차를 최신순으로 모은다.
 // symbolPrefix 는 슬러그 앞부분("btc" 등)으로 거른다.
-// sinceUnix 보다 오래된 회차를 만나면 멈춘다 — 없으면 무한히 페이지를 넘긴다.
+// sinceUnix 보다 오래된 회차를 만나면 멈춘다.
+//
+// 같은 슬러그는 한 번만 담는다. 커서 페이지네이션이 항목을 겹쳐서 돌려주는 일이
+// 실제로 있었고(G2 7일 구간에서 5분 슬롯 2,015개에 회차 2,686개), 그것을 독립
+// 표본으로 세면 표본 수가 부풀려져 표준오차가 과소평가된다.
+//
+// 커서가 전진하지 않거나 maxPages 를 넘으면 에러다 — 3 req/s 무한 루프를 도는
+// 것보다 낫다.
 func FetchResolvedRounds(ctx context.Context, c *Client, symbolPrefix string, sinceUnix int64) ([]Round, error) {
 	var out []Round
+	seen := make(map[string]bool)
 	cursor := ""
-	for page := 0; ; page++ {
+	for page := 0; page < maxPages; page++ {
 		q := url.Values{}
 		q.Set("marketVariant", "CRYPTO_UP_DOWN")
 		q.Set("status", "RESOLVED")
@@ -81,6 +97,10 @@ func FetchResolvedRounds(ctx context.Context, c *Client, symbolPrefix string, si
 			if !strings.HasPrefix(row.Slug, symbolPrefix+"-") {
 				continue
 			}
+			if seen[row.Slug] {
+				continue // 페이지가 겹쳐서 돌려준 같은 회차
+			}
+			seen[row.Slug] = true
 			sp, err1 := row.VariantData.StartPrice.Float64()
 			ep, err2 := row.VariantData.EndPrice.Float64()
 			if err1 != nil || err2 != nil || sp <= 0 || ep <= 0 {
@@ -97,6 +117,12 @@ func FetchResolvedRounds(ctx context.Context, c *Client, symbolPrefix string, si
 		if pg.Cursor == nil || *pg.Cursor == "" {
 			return out, nil
 		}
+		if *pg.Cursor == cursor {
+			// 커서가 제자리다. 종료 조건 네 개(빈 데이터 / sinceUnix 미만 /
+			// 빈 커서 / 에러) 중 어느 것도 이 경우를 잡지 못하므로 여기서 끊는다.
+			return out, fmt.Errorf("%d번째 페이지: 커서가 전진하지 않는다", page)
+		}
 		cursor = *pg.Cursor
 	}
+	return out, fmt.Errorf("페이지 상한 %d 를 넘었다 — 커서가 순환하는 것으로 보인다", maxPages)
 }
