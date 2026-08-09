@@ -53,11 +53,14 @@ func TestRowPanicsOutsideTruncatedRange(t *testing.T) {
 	_ = m.Row(4)
 }
 
-func TestSetRowPanicsOutsideRange(t *testing.T) {
-	m := NewMatrix(2, 2)
+// Truncate 로 줄인 뒤 여분 용량 안쪽 행에 쓰는 경우. 내장 슬라이스 패닉이
+// 대신 걸리지 않으므로 SetRow 자신의 범위 검사만이 이것을 막는다.
+func TestSetRowPanicsWithinCapacityAfterTruncate(t *testing.T) {
+	m := NewMatrix(10, 2)
+	m.Truncate(2)
 	defer func() {
 		if recover() == nil {
-			t.Fatal("SetRow(5, ...) 가 패닉하지 않았다")
+			t.Fatal("Truncate(2) 뒤 SetRow(5,...) 가 패닉하지 않았다 — 잘려나간 행에 조용히 쓴다")
 		}
 	}()
 	m.SetRow(5, []float64{1, 2})
