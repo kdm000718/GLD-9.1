@@ -37,3 +37,38 @@ func TestMatrixTruncate(t *testing.T) {
 		t.Error("Truncate 가 남은 데이터를 훼손했다")
 	}
 }
+
+func TestRowPanicsOutsideTruncatedRange(t *testing.T) {
+	m := NewMatrix(5, 2)
+	for i := 0; i < 5; i++ {
+		m.SetRow(i, []float64{float64(i), float64(i)})
+	}
+	m.Truncate(2)
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("Truncate(2) 뒤 Row(4) 가 패닉하지 않았다 — 낡은 행이 조용히 돌아온다")
+		}
+	}()
+	_ = m.Row(4)
+}
+
+func TestSetRowPanicsOutsideRange(t *testing.T) {
+	m := NewMatrix(2, 2)
+	defer func() {
+		if recover() == nil {
+			t.Fatal("SetRow(5, ...) 가 패닉하지 않았다")
+		}
+	}()
+	m.SetRow(5, []float64{1, 2})
+}
+
+func TestSetRowRejectsWrongLength(t *testing.T) {
+	m := NewMatrix(2, 3)
+	defer func() {
+		if recover() == nil {
+			t.Fatal("길이가 다른 행을 받아들였다")
+		}
+	}()
+	m.SetRow(0, []float64{1, 2})
+}
