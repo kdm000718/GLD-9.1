@@ -40,13 +40,28 @@ EOA 로 인증하고, EIP-712 주문에 서명한다. 게이트는 **G3(TS SDK �
 
 ## 실물로 확인해야 하는 것 (Task 10 산출물)
 
-스펙이 "추측하면 서명이 조용히 거부되거나, 더 나쁘게는 의도와 다른 금액이 나간다"
-고 적은 항목들이다. Task 10 이 실측으로 답을 내고 `docs/results/p4-findings.md` 에 남긴다.
+**2026-08-09 에 SDK `@predictdotfun/sdk@1.3.8` 을 직접 뜯어 상당수가 확정됐다.**
+남은 것만 Task 10 이 실측한다.
 
-1. Up/Down 마켓이 `CTF_EXCHANGE` 와 `NEG_RISK_CTF_EXCHANGE` 중 무엇을 쓰는가 (verifyingContract 가 갈린다)
-2. testnet 의 chainId 와 계약 주소 (스펙에는 메인넷 값만 있다)
-3. 주식 수량 단위 — 정수인가 소수 허용인가, `shareThreshold` 의 의미는 무엇인가
-4. 주문 배치(batch) 또는 수정(amend) 엔드포인트가 있는가 (있으면 재호가 요청 수가 절반이 되어 500ms 쿨다운을 완화할 수 있다)
+1. Up/Down 마켓이 네 변종 중 무엇인가 — `CTF_EXCHANGE` / `NEG_RISK_CTF_EXCHANGE` /
+   `YIELD_BEARING_CTF_EXCHANGE` / `YIELD_BEARING_NEG_RISK_CTF_EXCHANGE`
+2. `shareThreshold` 의 의미
+3. 주문 배치·수정 엔드포인트 유무
+4. 인증 응답(`/v1/auth/message`, `/v1/auth/jwt`)의 실제 필드명
+
+**SDK 로 확정된 것 — 더 이상 추측하지 않는다.** 스펙 §6 에 표로 있다.
+chainId 56/97 · 양쪽 체인 전체 주소표 · USDT 18 decimals · 최소 수량 `1e16` ·
+가격 유효숫자 3자리·수량 5자리 절단 · Kernel 서명 봉투 · `MAX_SALT = 2^31`.
+
+## 자금 계정과 서명 지갑
+
+사용자 계정은 **ZeroDev Kernel 스마트 계정**(`predictAccount` = 입금 주소)이고,
+서명은 계정 설정에서 내보낸 **Privy 지갑**이 한다. 주문의 `maker` 와 `signer` 는
+**둘 다 predictAccount** 이며 Privy 주소가 아니다. 자세한 것은 스펙 §6 의
+"자금 계정과 서명 지갑은 다르다" 절.
+
+이 때문에 **주문 서명이 Order 다이제스트를 그대로 쓰지 않고 Kernel 도메인으로 한 겹
+감싼다.** Task 8 이 그 경로를 구현하고 Task 9 가 SDK 와 대조한다.
 
 ## 파일 구조
 
@@ -1432,12 +1447,15 @@ git commit -m "predictfun/auth — EOA 서명과 JWT 발급 (go-ethereum v1.15.0
 **Interfaces:**
 - Consumes: `auth.Signer`, `go-ethereum/signer/core/apitypes`
 - Produces:
-  - `order.Tick{V int64, Precision int}` — 정수 틱 가격과 그 마켓의 정밀도. `order.NewTick(v int64, precision int) Tick`, `(Tick).Float() float64`, `(Tick).Add(n int64) Tick`, `order.Ceiling(precision int) Tick` (0.5 미만 최대 틱)
+  - `order.Tick{V int64, Precision int}` — 정수 틱 가격과 그 마켓의 정밀도. `order.NewTick(v int64, precision int) Tick`, `(Tick).Float() float64`, `(Tick).Add(n int64) Tick`, `order.Ceiling(precision int) Tick` (0.5 미만 최대 틱), `(Tick).WeiPerShare() *big.Int` (틱 → 18 decimals wei)
   - `order.Order{Salt, Maker, Signer, Taker, TokenID, MakerAmount, TakerAmount, Expiration, Nonce, FeeRateBps *big.Int, Side, SignatureType uint8}`
   - `order.Domain{Name, Version string, ChainID int64, VerifyingContract string}`
-  - `order.Hash(o Order, d Domain) ([]byte, error)`
-  - `order.Sign(o Order, d Domain, s *auth.Signer) ([]byte, error)`
-  - `order.AmountsForBuy(price Tick, usdtWei *big.Int) (makerAmount, takerAmount *big.Int)`
+  - `order.Hash(o Order, d Domain) ([]byte, error)` — 표준 Order EIP-712 다이제스트
+  - `order.RetainSignificantDigits(n *big.Int, digits int) *big.Int`
+  - `order.AmountsForBuy(priceWei, quantityWei *big.Int) (makerAmount, takerAmount *big.Int, err error)`
+  - `order.KernelDigest(orderDigest []byte, chainID int64, predictAccount common.Address) ([]byte, error)`
+  - `order.SignForPredictAccount(orderDigest []byte, chainID int64, predictAccount, validator common.Address, s *auth.Signer) ([]byte, error)` — 86바이트 봉투
+  - `order.SignEOA(o Order, d Domain, s *auth.Signer) ([]byte, error)` — predictAccount 를 쓰지 않는 경우
 
 - [ ] **Step 1: 틱과 금액 변환 테스트를 쓴다**
 
@@ -1471,35 +1489,56 @@ func TestTickFloat(t *testing.T) {
 	}
 }
 
-// BSC USDT 는 18 decimals 다. 6 으로 착각하면 10^12 배 주문이 나간다.
-func TestAmountsForBuyUses18Decimals(t *testing.T) {
-	// 1 USDT = 10^18 wei 를 0.49 에 산다 → 주식 수 = 1/0.49
-	one := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
-	maker, taker := AmountsForBuy(NewTick(49, 2), one)
-	if maker.Cmp(one) != 0 {
-		t.Fatalf("makerAmount %s, 기대 %s", maker, one)
+// SDK getLimitOrderAmounts(BUY) 를 그대로 따른다:
+//   quantityWei < 1e16 이면 거부
+//   price = retainSignificantDigits(priceWei, 3), qty = retainSignificantDigits(quantityWei, 5)
+//   makerAmount = price*qty/1e18, takerAmount = qty
+// 이 절단을 재현하지 않으면 같은 의도의 주문이 SDK 와 다른 금액으로 나간다.
+func TestAmountsForBuyMatchesSDKRule(t *testing.T) {
+	e18 := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	price := new(big.Int).Div(new(big.Int).Mul(big.NewInt(49), e18), big.NewInt(100)) // 0.49
+	qty := new(big.Int).Mul(big.NewInt(2), e18)                                       // 2주
+
+	maker, taker, err := AmountsForBuy(price, qty)
+	if err != nil {
+		t.Fatal(err)
 	}
-	// 가격 = maker/taker 여야 하므로 taker = maker/0.49 = maker*100/49
-	want := new(big.Int).Div(new(big.Int).Mul(one, big.NewInt(100)), big.NewInt(49))
-	if taker.Cmp(want) != 0 {
-		t.Fatalf("takerAmount %s, 기대 %s", taker, want)
+	if taker.Cmp(qty) != 0 {
+		t.Fatalf("takerAmount %s, 기대 %s (수량 그대로)", taker, qty)
+	}
+	want := new(big.Int).Div(new(big.Int).Mul(price, qty), e18) // 0.98 USDT
+	if maker.Cmp(want) != 0 {
+		t.Fatalf("makerAmount %s, 기대 %s", maker, want)
 	}
 }
 
-// 주식 수는 내림해야 한다. 올림하면 같은 USDT 로 더 많은 주식을 요구하게 되어
-// 실효 가격이 목표가보다 낮아지고, 거래소가 거부하거나 체결이 안 된다.
-func TestAmountsForBuyRoundsDownShares(t *testing.T) {
-	// 3 wei 를 0.49 에 산다 → 3/0.49 = 6.12... → 내림 6
-	maker, taker := AmountsForBuy(NewTick(49, 2), big.NewInt(3))
-	if maker.Cmp(big.NewInt(3)) != 0 {
-		t.Fatalf("makerAmount %s, 기대 3", maker)
+func TestAmountsForBuyRejectsBelowMinQuantity(t *testing.T) {
+	e18 := new(big.Int).Exp(big.NewInt(10), big.NewInt(18), nil)
+	price := new(big.Int).Div(e18, big.NewInt(2))
+	// 1e16 미만은 거부. 문서 주석은 1e18 이라 적혀 있으나 코드는 1e16 이다.
+	if _, _, err := AmountsForBuy(price, big.NewInt(9_999_999_999_999_999)); err == nil {
+		t.Fatal("1e16 미만 수량을 받아들였다")
 	}
-	if taker.Cmp(big.NewInt(6)) != 0 {
-		t.Fatalf("takerAmount %s, 기대 6 (내림) — 올림하면 7 이 된다", taker)
+	if _, _, err := AmountsForBuy(price, big.NewInt(10_000_000_000_000_000)); err != nil {
+		t.Fatalf("정확히 1e16 을 거부했다: %v", err)
 	}
-	// 실효 가격이 목표가 이상이어야 한다: maker/taker >= 0.49
-	if new(big.Rat).SetFrac(maker, taker).Cmp(big.NewRat(49, 100)) < 0 {
-		t.Errorf("실효 가격이 목표가보다 낮다: %s/%s", maker, taker)
+}
+
+// 절단은 반올림이 아니다. 초과 자릿수만큼 나눴다가 다시 곱한다.
+func TestRetainSignificantDigits(t *testing.T) {
+	cases := []struct{ in string; digits int; want string }{
+		{"123456789", 3, "123000000"},
+		{"999999999", 3, "999000000"},   // 반올림이면 1000000000 이 된다
+		{"12", 5, "12"},                 // 자릿수가 모자라면 그대로
+		{"0", 3, "0"},
+		{"490000000000000000", 3, "490000000000000000"},
+	}
+	for _, c := range cases {
+		in, _ := new(big.Int).SetString(c.in, 10)
+		want, _ := new(big.Int).SetString(c.want, 10)
+		if got := RetainSignificantDigits(in, c.digits); got.Cmp(want) != 0 {
+			t.Errorf("RetainSignificantDigits(%s, %d) = %s, 기대 %s", c.in, c.digits, got, c.want)
+		}
 	}
 }
 
@@ -1639,13 +1678,127 @@ func Hash(o Order, d Domain) ([]byte, error) {
 }
 ```
 
-- [ ] **Step 5: 통과 확인과 커밋**
+- [ ] **Step 5: Kernel 서명 봉투를 구현한다**
+
+**여기가 이 태스크의 핵심이다.** `predictAccount` 를 쓰면 Order 다이제스트를 그대로
+서명하지 않는다. Kernel 도메인으로 한 겹 감싼 뒤 `personal_sign` 하고, 검증자 주소를
+앞에 붙인 86바이트 봉투를 만든다. 스펙 §6 의 "predictAccount 주문의 서명은 한 겹 더
+감싼다" 를 읽고 시작한다.
+
+```go
+// KernelDigest 는 Order 다이제스트를 Kernel 도메인으로 감싼다.
+//
+// SDK 의 eip712WrapHash + hashKernelMessage 를 옮긴 것이다. 세 군데가 함정이다:
+// Kernel 도메인의 verifyingContract 는 predictAccount 이지 Kernel 구현 주소가 아니고,
+// 도메인에 salt 는 없으며, inner 는 Order 다이제스트를 Kernel(bytes32 hash) 구조체에
+// 넣어 다시 해시한 값이다.
+func KernelDigest(orderDigest []byte, chainID int64, predictAccount common.Address) ([]byte, error) {
+	if len(orderDigest) != 32 {
+		return nil, fmt.Errorf("Order 다이제스트는 32바이트여야 한다 (받은 길이 %d)", len(orderDigest))
+	}
+	typeHash := crypto.Keccak256([]byte("Kernel(bytes32 hash)"))
+	inner := crypto.Keccak256(typeHash, orderDigest) // abi.encode(bytes32,bytes32) == 단순 연결
+
+	kd := apitypes.TypedData{
+		Types: apitypes.Types{"EIP712Domain": {
+			{Name: "name", Type: "string"},
+			{Name: "version", Type: "string"},
+			{Name: "chainId", Type: "uint256"},
+			{Name: "verifyingContract", Type: "address"},
+		}},
+		PrimaryType: "EIP712Domain",
+		Domain: apitypes.TypedDataDomain{
+			Name: "Kernel", Version: "0.3.1",
+			ChainId:           math.NewHexOrDecimal256(chainID),
+			VerifyingContract: predictAccount.Hex(),
+		},
+	}
+	sep, err := kd.HashStruct("EIP712Domain", kd.Domain.Map())
+	if err != nil {
+		return nil, err
+	}
+	return crypto.Keccak256([]byte{0x19, 0x01}, sep, inner), nil
+}
+
+// SignForPredictAccount 는 Kernel 계정용 서명 봉투를 만든다.
+//
+// 마지막 서명이 signTypedData 가 아니라 signMessage 다 — 즉 32바이트 다이제스트에
+// "\x19Ethereum Signed Message:\n32" 접두사가 한 번 더 붙는다. 이것을 빠뜨리면
+// 서명이 조용히 거부된다.
+func SignForPredictAccount(orderDigest []byte, chainID int64,
+	predictAccount, validator common.Address, s *auth.Signer) ([]byte, error) {
+
+	d, err := KernelDigest(orderDigest, chainID, predictAccount)
+	if err != nil {
+		return nil, err
+	}
+	sig, err := s.SignHash(accounts.TextHash(d))
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 0, 1+20+65)
+	out = append(out, 0x01)
+	out = append(out, validator.Bytes()...)
+	out = append(out, sig...)
+	return out, nil
+}
+```
+
+`abi.encode(bytes32, bytes32)` 가 두 32바이트 워드의 단순 연결이라는 점을 이용했다.
+동적 타입이 없으므로 패딩이 필요 없다. **의심되면 SDK 와 대조하는 Task 9 가 잡는다.**
+
+- [ ] **Step 6: 봉투 형식 테스트**
+
+```go
+func TestSignForPredictAccountEnvelope(t *testing.T) {
+	s, err := auth.NewSigner("4c0883a69102937d6231471b5dbb6204fe512961708279f2e3e8a5d4b8e3e3e3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	acct := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	val := common.HexToAddress("0x845ADb2C711129d4f3966735eD98a9F09fC4cE57")
+	digest := make([]byte, 32)
+	for i := range digest {
+		digest[i] = byte(i)
+	}
+	sig, err := SignForPredictAccount(digest, 56, acct, val, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(sig) != 86 {
+		t.Fatalf("봉투 %d바이트, 기대 86 (1 + 20 + 65)", len(sig))
+	}
+	if sig[0] != 0x01 {
+		t.Errorf("첫 바이트 0x%02x, 기대 0x01", sig[0])
+	}
+	if got := common.BytesToAddress(sig[1:21]); got != val {
+		t.Errorf("검증자 주소 %s, 기대 %s", got, val)
+	}
+}
+
+// predictAccount 가 다르면 다이제스트가 달라야 한다 — 계정이 서명에 안 들어가면
+// 남의 계정 주문에 내 서명이 통한다.
+func TestKernelDigestDependsOnAccount(t *testing.T) {
+	d := make([]byte, 32)
+	a, _ := KernelDigest(d, 56, common.HexToAddress("0x1111111111111111111111111111111111111111"))
+	b, _ := KernelDigest(d, 56, common.HexToAddress("0x2222222222222222222222222222222222222222"))
+	if string(a) == string(b) {
+		t.Fatal("predictAccount 가 달라도 Kernel 다이제스트가 같다")
+	}
+	c, _ := KernelDigest(d, 97, common.HexToAddress("0x1111111111111111111111111111111111111111"))
+	if string(a) == string(c) {
+		t.Fatal("chainId 가 달라도 Kernel 다이제스트가 같다 — 테스트넷 서명이 메인넷에 통한다")
+	}
+}
+```
+
+- [ ] **Step 7: 통과 확인과 커밋**
 
 ```bash
 GOTOOLCHAIN=local go test -race ./internal/predictfun/order/ -v
 GOTOOLCHAIN=local go vet ./... && gofmt -l .
 git add internal/predictfun/order/
-git commit -m "predictfun/order — Order 값 타입, 틱 정규화, EIP-712 해싱"
+git commit -m "predictfun/order — Order 타입, 금액 계산, EIP-712 해싱, Kernel 서명 봉투"
 ```
 
 ---
@@ -1681,13 +1834,29 @@ git commit -m "predictfun/order — Order 값 타입, 틱 정규화, EIP-712 해
 ```
 
 `tools/export_sdk_vectors.ts` 는 알려진 입력 여러 벌에 대해 SDK 가 계산하는
-EIP-712 다이제스트와 서명을 뽑는다. 최소 다음 경우를 넣는다:
+다이제스트와 서명을 뽑는다. **두 경로를 모두 덮어야 한다** — 평범한 EOA 서명과,
+우리가 실제로 쓸 `predictAccount` Kernel 봉투 서명.
 
-1. 정밀도 2, 가격 0.49, 1 USDT, CTF_EXCHANGE
-2. 정밀도 3, 가격 0.499, 1 USDT, CTF_EXCHANGE
+평범한 EOA 경로 (`OrderBuilder.make(chainId, signer)`):
+
+1. 정밀도 2, 가격 0.49, 2주, CTF_EXCHANGE
+2. 정밀도 3, 가격 0.499, 2주, CTF_EXCHANGE
 3. 같은 주문, `NEG_RISK_CTF_EXCHANGE` — verifyingContract 가 해시를 바꾸는지 고정
-4. 큰 금액 (1000 USDT) — 18 decimals 자릿수 회귀
+4. 큰 금액 (1000주) — 18 decimals 와 유효숫자 절단 회귀
 5. `salt` 가 다른 두 주문 — salt 가 해시에 들어가는지 고정
+
+**predictAccount 경로** (`OrderBuilder.make(chainId, signer, {predictAccount})`) — 실제
+운용 경로다. `ecdsaValidatorStorage` 를 조회하지 않도록 `signTypedDataOrder` 대신
+`buildTypedDataHash` + `signPredictAccountMessage` 를 직접 부르거나, 체인에 붙지 않는
+경로를 쓴다:
+
+6. chainId 56, predictAccount A — Order 다이제스트와 **Kernel 래핑 다이제스트를 둘 다** 기록
+7. 같은 주문, predictAccount B — 계정이 다이제스트를 바꾸는지 고정
+8. 같은 주문, chainId 97 — 체인이 다이제스트를 바꾸는지 고정 (테스트넷 서명이 메인넷에 통하면 안 된다)
+9. 최종 86바이트 봉투 — `0x01 || ECDSA_VALIDATOR || sig65` 형식 고정
+
+각 원소에 `orderDigest`(표준) 와 `kernelDigest`(래핑), `signature`(최종 봉투)를
+따로 기록한다. Go 쪽이 어느 단계에서 갈리는지 짚으려면 중간값이 필요하다.
 
 서명 키는 테스트 전용 폐기 키
 `4c0883a69102937d6231471b5dbb6204fe512961708279f2e3e8a5d4b8e3e3e3` 를 쓴다.
@@ -1707,10 +1876,12 @@ Expected: 5개, 다이제스트가 서로 다름(3번과 1번이 특히)
 `cmd/g3check/main.go` 는 골든을 읽어 각 벡터에 대해 Go 의 `order.Hash` 와
 `order.Sign` 을 돌리고 대조한다. 판정 규칙:
 
-- 다이제스트는 **완전 일치**여야 한다. 1비트라도 다르면 실패.
+- `orderDigest` 는 **완전 일치**여야 한다. 1비트라도 다르면 실패.
+- `kernelDigest` 도 완전 일치여야 한다. 여기서 갈리면 `KernelDigest` 의 abi 인코딩이나 도메인 구성이 틀린 것이다.
 - 서명도 완전 일치여야 한다 — secp256k1 서명은 결정적(RFC 6979)이므로 같은 키·같은 해시면 같은 서명이 나온다.
 - 벡터를 0개 비교하고 통과하지 않는다.
 - 다이제스트가 전부 서로 같으면 실패한다 — 입력이 해시에 안 들어간 것이다.
+- **평범한 EOA 벡터만 통과하고 predictAccount 벡터를 하나도 안 봤으면 실패한다.** 그것이 실제 운용 경로다.
 
 ```go
 if compared == 0 {
@@ -1791,8 +1962,17 @@ Task 7 에서 `map[string]any` 로 남겨둔 응답 필드를 여기서 확정�
 - [ ] **Step 4: 온체인 승인 (가스 필요)**
 
 USDT `approve`, ConditionalTokens `setApprovalForAll`. **최초 1회다.**
-승인 대상 주소가 CTF 인지 NEG_RISK 인지는 Step 5 에서 확정되므로, 먼저 마켓
-메타데이터로 어느 Exchange 인지 확인한 뒤 그 주소에만 승인한다.
+
+`predictAccount` 가 설정되면 SDK 는 모든 승인을 **`Kernel.execute` 로 라우팅한다**
+(README: "every step routes through `Kernel.execute` when a `predictAccount` is
+configured"). 승인 주체는 predictAccount 이고 트랜잭션 가스는 **Privy 지갑**이 낸다.
+Privy 지갑에 BNB 소액이 있어야 한다.
+
+승인 대상은 마켓이 쓰는 Exchange 주소다. Step 5 의 마켓 메타데이터로 네 변종 중
+무엇인지 확정한 뒤 **그 주소에만** 승인한다.
+
+SDK 의 `getApprovalSteps` 는 서명 없이 순수하게 필요한 승인 목록을 돌려준다.
+Go 로 옮기기 전에 그 목록을 먼저 뽑아 무엇을 승인하게 되는지 눈으로 확인한다.
 
 - [ ] **Step 5: 최소 금액 주문 왕복 (잔고 필요)**
 
