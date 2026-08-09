@@ -323,7 +323,16 @@ func Build(v *clock.MarketView) ([]float64, bool) {
 		return nil, false
 	}
 	f := make([]float64, len(FeatureNames))
-	set := func(name string, val float64) { f[index[name]] = val }
+	// 이름을 못 찾으면 즉시 죽인다. map 의 제로값을 그대로 쓰면 오타 하나가
+	// 에러 없이 f[0](= m1_ret1)을 덮어쓴다. Python 은 dict 라 나중에
+	// FEATURE_NAMES 순회에서 KeyError 가 나지만 Go 슬라이스는 조용히 넘어간다.
+	set := func(name string, val float64) {
+		i, ok := index[name]
+		if !ok {
+			panic("알 수 없는 피처 이름: " + name)
+		}
+		f[i] = val
+	}
 
 	b1 := v.Bars1m.Last(Win1m)
 	b5 := v.Bars5m.Last(Win5m)
@@ -620,6 +629,21 @@ func itoa(i int) string {
 Run: `go test ./internal/features/ -v && go vet ./...`
 Expected: PASS (6개 테스트). `TestBuildIsInvariantUnderTruncation` 이 특히 중요하다.
 
+#### 피처가 누락되는 두 경로와 그 방어
+
+이름을 잘못 쓰거나 빠뜨리면 조용히 틀린 값이 나갈 수 있다. 두 경로를 구분해 둔다.
+
+**오타** — `set("m1_ret5x", …)` 처럼 없는 이름을 쓰는 경우. `set` 이 맵 조회에
+실패하면 즉시 panic 한다(Step 8 코드). 방어하지 않으면 맵의 제로값 때문에
+`f[0]`(= `m1_ret1`)이 덮여 쓰이고, 두 피처가 동시에 틀리면서 아무 에러도 안 난다.
+
+**호출 누락** — 어떤 피처에 `set` 을 아예 안 하는 경우. 그 피처는 0 으로 남는다.
+이건 panic 으로 못 잡지만 **Task 8 의 골든 대조가 잡는다**: 51개 실값 피처는
+Python 쪽이 0 이 아니므로 대조에서 즉시 어긋난다. 남은 9개(`p_*`)는 `+0분`에서
+정상값도 0 이라 누락돼도 결과가 같다 — 이 범위에서는 무해하다.
+(`p_*` 를 쓰는 `k>=1` 경로를 나중에 살릴 때는 이 보증이 사라지므로, 그때
+골든 벡터를 `k>=1` 시점으로도 뽑아야 한다.)
+
 - [ ] **Step 10: 커밋**
 
 ```bash
@@ -878,8 +902,17 @@ git commit -m "G1 피처 동등성 게이트 — Python 골든 벡터 2000시점
 ### Task 9: 로지스틱 회귀 — 추론과 학습
 
 `scipy.optimize.minimize(method="L-BFGS-B")` 자리에 `gonum.org/v1/gonum/optimize` 의
-LBFGS 를 쓴다. 목적함수가 L2 항 때문에 **강볼록**이라 최적점이 유일하고, 수렴
-조건만 충분히 조이면 두 최적화기가 같은 점에 도달한다. 이것이 Task 12 재현의 근거다.
+LBFGS 를 쓴다. 목적함수가 L2 항 때문에 **강볼록**이라 최적점이 유일하다.
+
+**단, 두 최적화기가 같은 점에 도달하지는 않는다.** 팀리드가 실측했다 —
+참조 실행의 scipy 는 |g|max 가 0.57~1.04 인 지점에서 멈춘다(수렴 아님).
+조인 설정은 ~1e-4 까지 간다. Python 의 52.773% 는 최적점의 값이 아니라
+scipy 가 멈춘 자리의 값이고, gonum 을 조일수록 그 자리에서 멀어진다.
+
+그래도 조이는 것이 맞다. 실거래 모델은 최적점에 있는 편이 낫고, 실측한
+차이는 작다 — 확률 최대 1.2e-3, 판정 뒤집힘 0.055%, AUC 차이 7.9e-06.
+Task 12 는 이 차이를 감안한 허용오차로 대조한다. 여기서 scipy 의 정지
+조건을 흉내내려 하지 말 것.
 
 100만 행 × 60 피처를 다루므로 `[][]float64` 가 아니라 평면 `float32` 행렬을 쓴다
 (Python 도 float32 를 썼다).
@@ -1281,8 +1314,10 @@ func Fit(mat *Matrix, rows []int, y []float64, names []string, l2 float64) (*Log
 	}
 
 	problem := optimize.Problem{Func: objective, Grad: gradient}
-	// 목적함수가 L2 때문에 강볼록이라 최적점이 유일하다. 수렴만 충분히 조이면
-	// scipy L-BFGS-B 와 같은 점에 도달한다 — Task 12 재현의 근거다.
+	// 목적함수가 L2 때문에 강볼록이라 최적점이 유일하다. 여기서는 그 최적점까지
+	// 제대로 수렴시킨다. 참조 구현의 scipy 는 기본 ftol 때문에 |g|max 0.6~1.0 에서
+	// 멈추지만, 그 정지 지점을 흉내내지 않는다 — 실거래 모델은 최적점에 있는 편이
+	// 낫고, 실측한 차이는 확률 1.2e-3 수준으로 작다. Task 12 가 그만큼을 감안한다.
 	settings := &optimize.Settings{
 		GradientThreshold: 1e-8,
 		MajorIterations:   2000,
@@ -1809,6 +1844,54 @@ Go 파이프라인 전체를 2017-08-17~ 전 구간에 돌려 Python 이 낸 숫
 Python 참조값 (`out_full/summary_full.json`):
 정확도 **52.773%**, AUC **0.5408**, ECE **0.0080**, n **888,525**, 재학습 **104회**.
 
+### 먼저: 입력 구간을 Python 실행과 맞춰야 한다
+
+`vision.LoadFullHistory` 는 **실행일 기준 "어제까지"** 를 받는다. Python 참조 실행은
+2026-08-06 까지였으므로, 오늘 Go 를 돌리면 데이터가 더 많아 표본 수가 반드시 어긋난다.
+실측으로 확인된 차이다 — Go 가 받은 5분봉 942,313 봉 vs Python 942,025 봉, 차이 288 =
+정확히 하루치.
+
+**n 의 완전 일치는 입력이 같을 때만 성립하는 기준이다.** 이 절단을 빠뜨리면 게이트가
+반드시 실패하고, 그 실패를 "포팅 오류" 로 오독하게 된다. `cmd/backtest` 의 `-end`
+플래그가 그 역할을 하며 기본값은 Python 참조 실행의 마지막 5분봉 시작 시각이다.
+
+`run` 안에서 `b1`·`b5` 를 로드한 직후, 아래 truncate 를 적용한 뒤 `buildMatrix` 를
+호출한다. `sort` 를 import 에 추가한다.
+
+```go
+// truncateTo 는 open_time 이 endMS 를 넘는 봉을 잘라낸다.
+func truncateTo(b bars.Bars, endMS int64) bars.Bars {
+	hi := sort.Search(b.Len(), func(i int) bool { return b.OpenTime[i] > endMS })
+	return b.Slice(0, hi)
+}
+```
+
+```go
+	end, err := time.Parse(time.RFC3339, endFlag)
+	if err != nil {
+		return fmt.Errorf("-end 파싱 실패: %w", err)
+	}
+	endMS := end.UnixMilli()
+	// 경계는 타임프레임마다 다르다. -end 는 마지막 5분봉의 '시작' 시각이므로
+	// 5분봉은 그대로 자르고, 1분봉은 그 봉을 구성하는 마지막 분(+4분)까지 남긴다.
+	// 같은 경계를 두 곳에 쓰면 1분봉이 정확히 4개 모자란다 (실측 확인).
+	b1 = truncateTo(b1, endMS+4*60_000)
+	b5 = truncateTo(b5, endMS)
+	fmt.Printf("  절단 후 1분봉 %d / 5분봉 %d  (기준 %s)\n", b1.Len(), b5.Len(), endFlag)
+	if b1.Len() != 4_710_079 || b5.Len() != 942_025 {
+		return fmt.Errorf("절단 후 봉 수가 Python 참조와 다르다: 1분봉 %d(기대 4710079) / 5분봉 %d(기대 942025)",
+			b1.Len(), b5.Len())
+	}
+```
+
+절단 후 봉 수가 Python 참조(1분봉 4,710,079 / 5분봉 942,025)와 맞는지 먼저 확인하고,
+어긋나면 표본 생성으로 넘어가기 전에 멈춘다. 여기서 안 맞으면 뒤의 어떤 수치도 비교할
+의미가 없다.
+
+**이 절단은 이미 실측 검증했다.** 받아둔 캐시에 위 경계를 적용하면 1분봉 4,710,079 /
+5분봉 942,025 로 Python 참조와 정확히 일치한다. 두 타임프레임에 같은 경계를 쓰면
+1분봉이 23:56~23:59 네 개만큼 모자라므로, `+4*60_000` 을 빼먹지 말 것.
+
 **Files:**
 - Create: `cmd/backtest/main.go`
 - Create: `docs/results/g1prime-fullhistory.log` (실행 결과)
@@ -1854,15 +1937,18 @@ func main() {
 	trainDays := flag.Float64("train-days", 180, "학습 창 (일)")
 	refitDays := flag.Float64("refit-days", 30, "재학습 주기 (일)")
 	l2 := flag.Float64("l2", 10, "L2 세기")
+	// Python 참조 실행과 입력을 맞추기 위한 절단 기준. 이것 없이는 실행일에 따라
+	// 데이터가 늘어나 표본 수가 어긋난다.
+	endFlag := flag.String("end", "2026-08-06T23:55:00Z", "마지막 5분봉 시작 시각 (RFC3339)")
 	flag.Parse()
 
-	if err := run(*symbol, *cache, *trainDays, *refitDays, *l2); err != nil {
+	if err := run(*symbol, *cache, *trainDays, *refitDays, *l2, *endFlag); err != nil {
 		fmt.Fprintln(os.Stderr, "실패:", err)
 		os.Exit(1)
 	}
 }
 
-func run(symbol, cache string, trainDays, refitDays, l2 float64) error {
+func run(symbol, cache string, trainDays, refitDays, l2 float64, endFlag string) error {
 	ctx := context.Background()
 	t0 := time.Now()
 

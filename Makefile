@@ -1,0 +1,43 @@
+export GOTOOLCHAIN := local
+
+build:
+	go build ./...
+
+test:
+	go test -race ./...
+
+vet:
+	go vet ./...
+
+# ---- 게이트 ----
+# 포팅은 조용히 틀린다. 단계마다 Python 원본과 대조한다.
+
+# G1 — 피처 동등성. 골든 벡터 2,997시점(k=0 2,000 + k=1~4 997)을 1e-9 로 대조하고,
+# Python 이 거부한 3개 시점을 Go 도 거부하는지 함께 본다.
+goldencheck:
+	go run ./cmd/goldencheck
+
+# G1' — 9년 전 구간 재현. 약 3분. 다섯 겹으로 판정한다:
+# 절단 봉 수 / 제외 항목별 개수 / candle_start·라벨 원소별 일치 /
+# Go 지표를 Python 확률값에 적용한 대조 / 표본별 확률 차이와 판정 뒤집힘.
+# data/reference/py_predictions_full.bin 이 필요하다 (README 참고).
+backtest:
+	go run ./cmd/backtest
+
+# G2 게이트. 5분 상품만 대상으로 정산 방향과 바이낸스 5분봉 방향을 대조한다.
+# 기본 7일 — 슬롯 2,015개(비교 1,996)에 표준오차 0.12%p. 판정이 뒤집히는 문턱은
+# d=54.8% 인데 실측이 0.30% 라 400 SE 넘게 떨어져 있으므로 7일이면 판정에 넘치게
+# 충분하고, 수집기를 멈춰야 하는 시간이 짧다. 더 긴 구간은 `make align DAYS=30`
+# (실측 d=0.3264% ±0.0616%p 로 7일치와 정합 — 구간을 늘려도 판정은 같다).
+#
+# PREDICT_API_KEY 가 필요하다. 값이 명령줄에 남지 않게 파일에서 읽을 것:
+#   set -a; . ~/.config/predictfun/env; set +a; make align
+DAYS ?= 7
+
+align:
+	go run ./cmd/align -days $(DAYS)
+
+# 게이트 셋을 순서대로. G2 는 PREDICT_API_KEY 가 필요하므로 뺐다.
+gates: goldencheck backtest
+
+.PHONY: build test vet goldencheck backtest align gates
