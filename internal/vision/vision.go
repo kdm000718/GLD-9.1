@@ -161,34 +161,76 @@ func fetchChunk(ctx context.Context, symbol, interval, kind, stamp, cacheDir str
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", name, err)
 	}
-	if err := os.WriteFile(cache, encodeCache(arr), 0o644); err != nil {
+	if err := writeCacheAtomic(cache, encodeCache(arr)); err != nil {
 		return nil, err
 	}
 	return arr, nil
 }
 
+// cacheMagic 뒤에 int64 행 수가 온다. 헤더가 있어야 잘린 파일을 알아본다 —
+// 88 배수 검사만으로는 행 하나가 통째로 날아간 파일을 구분하지 못한다.
+const cacheMagic = "GLD9BIN1"
+
 func encodeCache(arr [][11]float64) []byte {
-	buf := make([]byte, 8*11*len(arr))
-	for i, row := range arr {
-		for j, v := range row {
-			binary.LittleEndian.PutUint64(buf[(i*11+j)*8:], math.Float64bits(v))
+	out := make([]byte, 0, len(cacheMagic)+8+len(arr)*88)
+	out = append(out, cacheMagic...)
+	var hdr [8]byte
+	binary.LittleEndian.PutUint64(hdr[:], uint64(len(arr)))
+	out = append(out, hdr[:]...)
+	var buf [8]byte
+	for _, r := range arr {
+		for _, v := range r {
+			binary.LittleEndian.PutUint64(buf[:], math.Float64bits(v))
+			out = append(out, buf[:]...)
 		}
 	}
-	return buf
+	return out
 }
 
 func decodeCache(b []byte) ([][11]float64, error) {
-	if len(b)%(8*11) != 0 {
-		return nil, fmt.Errorf("캐시 파일이 손상됐다 (%d 바이트)", len(b))
+	const head = len(cacheMagic) + 8
+	if len(b) < head || string(b[:len(cacheMagic)]) != cacheMagic {
+		return nil, fmt.Errorf("캐시 형식이 아니다 (%d바이트)", len(b))
 	}
-	n := len(b) / (8 * 11)
+	n := int(binary.LittleEndian.Uint64(b[len(cacheMagic):head]))
+	want := head + n*88
+	if len(b) != want {
+		return nil, fmt.Errorf("캐시가 잘렸다: %d바이트, 헤더가 말하는 %d행이면 %d바이트여야 한다",
+			len(b), n, want)
+	}
 	out := make([][11]float64, n)
+	off := head
 	for i := 0; i < n; i++ {
 		for j := 0; j < 11; j++ {
-			out[i][j] = math.Float64frombits(binary.LittleEndian.Uint64(b[(i*11+j)*8:]))
+			out[i][j] = math.Float64frombits(binary.LittleEndian.Uint64(b[off:]))
+			off += 8
 		}
 	}
 	return out, nil
+}
+
+// writeCacheAtomic 은 같은 디렉터리에 임시 파일로 쓴 뒤 rename 한다.
+// rename 은 같은 파일시스템 안에서 원자적이므로, 쓰기 도중 죽어도 목적지에는
+// 온전한 파일이거나 아무것도 없거나 둘 중 하나만 남는다.
+func writeCacheAtomic(path string, data []byte) error {
+	f, err := os.CreateTemp(filepath.Dir(path), ".tmp-"+filepath.Base(path)+"-")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer os.Remove(tmp) // rename 이 성공하면 대상이 없으므로 무해하다
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 // LoadFullHistory 는 상장일부터 어제까지 전 구간을 하나의 Bars 로 합친다.

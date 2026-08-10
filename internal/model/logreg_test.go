@@ -123,6 +123,25 @@ func TestZeroVarianceFeatureGetsUnitSd(t *testing.T) {
 	}
 }
 
+// 이름 개수와 행렬 열 수가 다르면 Fit 이 거부해야 한다. 통과시키면
+// len(Coef) != len(FeatureNames) 인 모델이 만들어지고, 그 모순은 나중에
+// Load 시점에야 드러난다 — 그때는 이미 그 모델로 학습이 끝난 뒤다.
+func TestFitRejectsNameCountMismatch(t *testing.T) {
+	mat := NewMatrix(10, 3)
+	rows := make([]int, 10)
+	for i := range rows {
+		rows[i] = i
+		mat.SetRow(i, []float64{float64(i), 1, 2})
+	}
+	y := make([]float64, 10)
+	for i := range y {
+		y[i] = float64(i % 2)
+	}
+	if _, err := Fit(mat, rows, y, []string{"a", "b"}, 10); err == nil {
+		t.Fatal("이름 2개 / 열 3개인데 Fit 이 성공했다")
+	}
+}
+
 func TestJSONRoundTripMatchesPythonSchema(t *testing.T) {
 	lr := &LogReg{
 		L2: 10, Coef: []float64{0.1, -0.2}, Intercept: 0.05,

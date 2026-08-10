@@ -65,7 +65,7 @@ go.mod 가 1.22 를 요구하고 툴체인 자동 전환을 막아 두었다.
 ## 데이터
 
 바이낸스 Vision 의 월별·일별 K선 아카이브를 SHA256 검증과 함께 받아
-`data/vision/BTCUSDT/{1m,5m}` 에 바이너리로 캐시한다. 전체 9년치가 약 950MB,
+`data/vision/BTCUSDT/{1m,5m}` 에 바이너리로 캐시한다. 전체 9년치가 약 476MB,
 최초 다운로드는 2~3분이다. `data/` 는 gitignore 대상이다.
 
 **캐시 경로 주의**: `vision.LoadFullHistory` 는 인자로 받은 디렉터리에 `vision` 을

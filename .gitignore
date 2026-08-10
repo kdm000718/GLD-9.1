@@ -20,3 +20,9 @@ out/
 *.log
 # 게이트 결과는 기록으로 남긴다
 !docs/results/*.log
+/models.json
+
+# Task 9 가 tools/ 에서 npm install 을 돌린다. 앵커 없이 적어 어느 깊이에서든
+# 무시한다 — package.json 과 package-lock.json 은 커밋한다(골든 벡터를 다시
+# 만들 때 같은 버전이 나와야 한다).
+node_modules/

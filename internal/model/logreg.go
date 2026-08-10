@@ -53,6 +53,11 @@ func Fit(mat *Matrix, rows []int, y []float64, names []string, l2 float64) (*Log
 	if n == 0 {
 		return nil, fmt.Errorf("학습 표본이 없습니다")
 	}
+	if len(names) != p {
+		return nil, fmt.Errorf(
+			"피처 이름 %d개, 행렬 열 %d개 — 이름과 열이 어긋나면 계수가 엉뚱한 "+
+				"피처에 붙는다", len(names), p)
+	}
 
 	mu := make([]float64, p)
 	for _, r := range rows {

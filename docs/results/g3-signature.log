@@ -1,0 +1,12 @@
+[골든] 9개 벡터, 서명자 Signer(0x27000F84214f79B0600aa86841958b13ac98242a)
+  eoa             eoa/ctf/prec2                    order=0xd5bdcefefe117902 sig=0xa73a7b7d1b4763e9
+  eoa             eoa/ctf/prec3                    order=0x8312bde07fc3c2b5 sig=0xe0f4adfdbaad3744
+  eoa             eoa/negrisk/prec2                order=0x3bfec78a173fc9a0 sig=0x9bc00ac5622e6bed
+  eoa             eoa/ctf/large1000                order=0xa5fd46f1c8d234c3 sig=0x7656e1b73339fef0
+  eoa             eoa/ctf/altsalt                  order=0x2debf3fff140796a sig=0xb774e150d3527898
+  predictAccount  predictAccount/chain56/acctA     order=0xe0d85ebc20f3ecbc kernel=0x21362090da7c3ac7 sig=0x01845adb2c711129
+  predictAccount  predictAccount/chain56/acctB     order=0x66c1cdf1ee001a93 kernel=0xd2de11b77533675d sig=0x01845adb2c711129
+  predictAccount  predictAccount/chain97/acctA     order=0x218d18bda710c186 kernel=0x397d68dc7731266a sig=0x01845adb2c711129
+  predictAccount  predictAccount/chain56/acctA-envelope order=0x4fed20b2078f7676 kernel=0xfcf68829dc262ce9 sig=0x01845adb2c711129
+[대조] 총 9개 (eoa 5 / predictAccount 4)
+판정: 통과 — G3

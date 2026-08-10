@@ -2,6 +2,7 @@
 package rest
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -54,6 +55,45 @@ func (c *Client) Get(ctx context.Context, path string, q url.Values, out any) er
 	}
 	req.Header.Set("x-api-key", c.apiKey)
 	req.Header.Set("User-Agent", UserAgent)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("요청 실패 %s: %w", path, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%s: HTTP %d", path, resp.StatusCode)
+	}
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("응답 디코딩 실패 %s: %w", path, err)
+	}
+	return nil
+}
+
+// Post 는 body 를 JSON 으로 인코딩해 path 로 POST 하고 응답 JSON 을 out 에
+// 디코딩한다. Get 과 같은 헤더 설정과 throttle(ctx) 을 그대로 따른다 —
+// 레이트리밋은 API 키 단위이고 인증 요청도 같은 예산에서 나가므로 별도의
+// 우회 경로를 만들지 않는다.
+// 에러 메시지에 API 키를 절대 넣지 않는다.
+func (c *Client) Post(ctx context.Context, path string, body, out any) error {
+	if err := c.throttle(ctx); err != nil {
+		return err
+	}
+
+	payload, err := json.Marshal(body)
+	if err != nil {
+		return fmt.Errorf("요청 본문 인코딩 실패 %s: %w", path, err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+path, bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("요청 생성 실패 %s: %w", path, err)
+	}
+	req.Header.Set("x-api-key", c.apiKey)
+	req.Header.Set("User-Agent", UserAgent)
+	// JSON 본문을 보내므로 붙인다. Get 에는 없는 헤더다 — 서버가 이 헤더를
+	// 요구/거부하는지는 Task 10 의 testnet 왕복에서 실측해 확인한다.
+	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.http.Do(req)
 	if err != nil {

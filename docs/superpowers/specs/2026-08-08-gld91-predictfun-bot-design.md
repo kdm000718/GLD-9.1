@@ -138,19 +138,53 @@ Python이 만든 피처 60개와 Go 피처를 비교. 전 성분 `1e-9` 이내.
 
 #### G2 실측 결과 (2026-08-09 재측정, 통과)
 
-7일 구간, **5분 상품만** 1,996 슬롯 비교(봉 결측 0, Chainlink 무변동 18,
-바이낸스 도지 10 제외):
+7일 구간, **5분 상품만** 1,987 슬롯 비교(봉 결측 0, Chainlink 무변동 27,
+바이낸스 도지 15 제외). 슬롯 충돌 0건 — 15분 상품 오염이 재발하지 않았다:
 
 | 항목 | %p |
 |---|---|
 | 기준 엣지 | +2.270 |
-| 정산 불일치 반영 (`d = 0.3006% ± 0.1225`) | −0.014 |
+| 정산 불일치 반영 (`d = 0.3020% ± 0.1231`) | −0.014 |
 | 도지 제외 편향 | −0.282 |
-| 메이커 리베이트 | +0.500 |
-| **합계** | **+2.474** |
+| 메이커 리베이트 (반대편 주식 — 아래 참조) | +0.487 |
+| **합계** | **+2.461** |
+
+#### 메이커 리베이트는 USDT 가 아니라 반대편 주식이다
+
+2026-08-09 사용자 확인. 규칙 셋이 확정됐다:
+
+- **0.5% 는 주식 수 기준**이다 — USDT 명목 기준이 아니다.
+- **체결 즉시** 지급된다.
+- 받은 주식은 **회차 정산 때 함께 정산된다.**
+
+그래서 YES 를 가격 `p` 에 `N` 주 사면 NO 를 `R = 0.005·N` 주 받는다. CTF 이진
+시장에서 YES+NO=1 이므로 NO 는 **우리가 질 때만** 값이 붙는다. 기대 기여분은
+`R·(1−q)` 이고 명목 `N·p` 대비로 환산하면
+
+```
+0.005 · (1 − q) / p        q = 0.5227(실측 승률), p = 0.49  →  0.487%
+```
+
+**현금 리베이트 가정(+0.500)보다 낮다.** 우리 승률 `q` 가 시장가 `p` 가 함축하는
+것보다 높기 때문이다 — **엣지가 좋을수록 리베이트를 덜 받는다.** 차이는 −0.013%p.
+
+대신 **손익과 음의 상관**이라 지는 회차의 손실을 줄이는 부분 헤지로 작동한다.
+기대값 표에는 안 잡히는 이득이다(분산 이야기다).
+
+**남은 미지수 하나.** 잔고 API 가 미정산 주식을 어떻게 보여주는가 — USDT 와 별도
+필드인가. **최대 4.55% 사이징의 분모**가 여기서 갈리므로 Task 10 이 확인한다
+(회차 중 equity 는 "USDT + 미정산 주식"이다).
+
+**엣지 부호는 어느 해석에서도 안 뒤집힌다.** 리베이트를 0 으로 놓아도 +1.974%p 다.
+`cmd/align` 이 그 소계를 따로 찍어, 판정이 리베이트 가정에 의존하는지를 로그만 보고
+알 수 있게 했다.
 
 기록: `docs/results/g2-align.log`. 30일 구간 독립 재측정도 정합한다 —
-n=8,579, `d = 0.3264% ± 0.0616`, 합계 +2.473%p.
+n=8,579, `d = 0.3264% ± 0.0616`, 합계 **+2.460%p**(그 `d` 에 새 리베이트 규칙을
+적용해 다시 계산한 값이다. 30일 측정 자체를 재실행하지는 않았다).
+
+세 번의 독립 측정이 `d ≈ 0.30~0.33%` 로 모인다 — 7일 두 번(0.3006 / 0.3020)과
+30일 한 번(0.3264). 정산 기준 불일치는 엣지를 사실상 갉아먹지 않는다(−0.014%p).
 
 **앞서 발표한 두 수치(d = 6.78%, 4.41%)는 폐기한다.** `ParseSlugStart` 이
 타임프레임을 `v % 300 == 0` 으로 추론했는데 모든 15분 경계가 5분 경계이기도 해서
@@ -332,20 +366,100 @@ if 잔여한도 < $1:  주문하지 않는다          # 무효 주문을 보내
 
 SDK에서 추출한 상수:
 
+SDK `@predictdotfun/sdk@1.3.8` 을 직접 뜯어 확인한 값이다(2026-08-09).
+
 ```
-도메인   name "predict.fun CTF Exchange" / version "1" / chainId 56
+도메인   name "predict.fun CTF Exchange" / version "1"
+         chainId 56(메인넷) 또는 97(테스트넷)
          verifyingContract = 마켓 종류에 따른 Exchange 주소
 Order    salt uint256 · maker address · signer address · taker address
          tokenId uint256 · makerAmount uint256 · takerAmount uint256
          expiration uint256 · nonce uint256 · feeRateBps uint256
          side uint8 · signatureType uint8
-값       side = BUY(0) · signatureType = EOA(0) · maker = signer = 지갑주소
-         taker = 0x0 · salt < 2^31
-BSC 메인넷  CTF_EXCHANGE          0x8BC070BEdAB741406F4B1Eb65A72bee27894B689
-            NEG_RISK_CTF_EXCHANGE 0x365fb81bd4A24D6303cd2F19c349dE6894D8d58A
-            CONDITIONAL_TOKENS    0x22DA1810B194ca018378464a58f6Ac2B10C9d244
-            USDT                  0x55d398326f99059fF775485246999027B3197955
+값       side = BUY(0) · signatureType = EOA(0) · taker = 0x0 · salt < 2^31
+         maker = signer = predictAccount   ← 아래 참조. 지갑 주소가 아니다.
 ```
+
+| 계약 | BNB 메인넷 (56) | BNB 테스트넷 (97) |
+|---|---|---|
+| CTF_EXCHANGE | `0x8BC070BEdAB741406F4B1Eb65A72bee27894B689` | `0x2A6413639BD3d73a20ed8C95F634Ce198ABbd2d7` |
+| NEG_RISK_CTF_EXCHANGE | `0x365fb81bd4A24D6303cd2F19c349dE6894D8d58A` | `0xd690b2bd441bE36431F6F6639D7Ad351e7B29680` |
+| YIELD_BEARING_CTF_EXCHANGE | `0x6bEb5a40C032AFc305961162d8204CDA16DECFa5` | `0x8a6B4Fa700A1e310b106E7a48bAFa29111f66e89` |
+| YIELD_BEARING_NEG_RISK_CTF_EXCHANGE | `0x8A289d458f5a134bA40015085A8F50Ffb681B41d` | `0x95D5113bc50eD201e319101bbca3e0E250662fCC` |
+| CONDITIONAL_TOKENS | `0x22DA1810B194ca018378464a58f6Ac2B10C9d244` | `0x2827AAef52D71910E8FBad2FfeBC1B6C2DA37743` |
+| USDT | `0x55d398326f99059fF775485246999027B3197955` | `0xB32171ecD878607FFc4F8FC0bCcE6852BB3149E0` |
+| KERNEL | `0xBAC849bB641841b44E965fB01A4Bf5F074f84b4D` | 같음 |
+| ECDSA_VALIDATOR | `0x845ADb2C711129d4f3966735eD98a9F09fC4cE57` | 같음 |
+
+### 자금 계정과 서명 지갑은 다르다 — predictAccount
+
+**이 절은 2026-08-09 에 정정됐다.** 처음에는 `maker = signer = 지갑주소` 로 적었으나
+SDK 를 읽어보니 틀렸다. 그대로 구현했으면 서명이 거부되거나 엉뚱한 계정으로 주문이
+나갔을 것이다.
+
+predict.fun 계정은 **ZeroDev Kernel 스마트 계정**(ERC-4337)이다. 자금은 그 주소
+(`predictAccount`, 계정 설정의 입금 주소)에 있고, 서명은 그 계정의 소유자로 등록된
+**Privy 지갑**이 한다. 온체인에서 `ECDSA_VALIDATOR.ecdsaValidatorStorage(predictAccount)`
+가 소유자를 돌려주며 SDK 는 그것이 서명 지갑 주소와 같은지 확인한 뒤에야 주문을 만든다.
+
+```
+자금 보유   predictAccount    Kernel 스마트 계정 = 입금 주소
+서명        Privy 지갑        계정 설정에서 개인키 내보내기 가능
+주문 필드   maker = signer = predictAccount   (Privy 주소가 아니다)
+검증        EIP-1271          SignatureType.EOA 가 EIP-1271 을 함께 지원한다
+승인        predictAccount 가 설정되면 모든 승인이 Kernel.execute 로 라우팅된다
+가스        Privy 지갑에 소액의 네이티브 코인(BNB)이 필요하다 — 승인과 취소에 쓴다
+```
+
+SDK README 의 "How to use a Predict account" 절이 이 순서를 그대로 적고 있고, 예제가
+`new Wallet(process.env.PRIVY_WALLET_PRIVATE_KEY)` 로 시작한다.
+
+**봇에 별도 지갑을 만들 필요가 없다.** 자금 보유와 서명의 분리를 플랫폼이 이미
+설계로 갖고 있다. 사용자가 어떤 지갑(바이낸스 월렛 등)으로 로그인·입금했는지는
+무관하다 — 봇이 필요로 하는 것은 Privy 지갑 키와 `predictAccount` 주소뿐이다.
+
+### predictAccount 주문의 서명은 한 겹 더 감싼다
+
+**Order EIP-712 다이제스트를 그대로 서명하지 않는다.** SDK `signTypedDataOrder` 가
+`predictAccount` 유무로 갈린다:
+
+```
+predictAccount 없음   signer.signTypedData(Exchange 도메인, Order)        ← 평범한 EOA
+predictAccount 있음   Order 다이제스트를 Kernel 도메인으로 감싼 뒤 서명    ← 우리 경우
+```
+
+감싸는 방식(`eip712WrapHash` + `hashKernelMessage`):
+
+```
+h        = Order 의 표준 EIP-712 다이제스트 (Exchange 도메인)
+inner    = keccak256( abi.encode( keccak256("Kernel(bytes32 hash)"), h ) )
+kdomain  = hashDomain({ name:"Kernel", version:"0.3.1", chainId, verifyingContract: predictAccount })
+digest   = keccak256( 0x19 0x01 || kdomain || inner )
+sig65    = personal_sign(digest)      ← signMessage 이므로 "\x19Ethereum Signed Message:\n32" 접두사가 한 번 더 붙는다
+서명필드  = 0x01 || ECDSA_VALIDATOR 주소(20바이트) || sig65      = 86 바이트
+```
+
+세 군데가 함정이다. Kernel 도메인의 `verifyingContract` 는 **predictAccount** 이지
+Kernel 구현 주소가 아니다. 마지막 서명은 `signTypedData` 가 아니라 `signMessage`
+이므로 개인서명 접두사가 한 번 더 붙는다. 그리고 최종 바이트열은 65 바이트 서명이
+아니라 검증자 주소를 앞에 붙인 86 바이트 봉투다.
+
+### 주문 금액 계산은 SDK 규칙을 따라야 한다
+
+`getLimitOrderAmounts` 의 BUY 경로:
+
+```
+if quantityWei < 1e16:  거부        ← 문서 주석은 1e18 이라 적혀 있으나 코드는 1e16 이다
+price = retainSignificantDigits(pricePerShareWei, 3)    유효숫자 3자리로 절단
+qty   = retainSignificantDigits(quantityWei,      5)    유효숫자 5자리로 절단
+makerAmount = price * qty / 1e18      지불할 USDT wei
+takerAmount = qty                     받을 주식 wei
+```
+
+`retainSignificantDigits(n, d)` 는 10진 자릿수를 세어 초과분만큼 나눴다가 다시
+곱하는 절단이다(반올림이 아니다). 이 절단을 재현하지 않으면 같은 의도의 주문이
+SDK 와 다른 금액으로 나간다. **BSC USDT 18 decimals 는 SDK 기본 precision 이
+`1e18` 인 것으로 확인됐다.**
 
 Go에서는 `github.com/ethereum/go-ethereum/signer/core/apitypes`로 구현한다. Order
 레이아웃이 Polymarket CTF Exchange와 동일하므로 표준 경로다.
@@ -354,13 +468,21 @@ Go에서는 `github.com/ethereum/go-ethereum/signer/core/apitypes`로 구현한�
 Bearer`. API 키(`x-api-key`)는 별도로 계속 붙인다 — 키는 읽기·레이트리밋용이고 주문
 권한과 무관하다.
 
-**P4에서 실물로 확인해야 하는 것 셋.** 추측하면 서명이 조용히 거부되거나, 더 나쁘게는
-의도와 다른 금액이 나간다.
+**P4에서 실물로 확인해야 하는 것.** 2026-08-09 에 SDK 를 직접 읽어 상당수가 확정됐고,
+남은 것만 적는다. 추측하면 서명이 조용히 거부되거나, 더 나쁘게는 의도와 다른 금액이 나간다.
 
-1. Up/Down 마켓이 `NEG_RISK` / `YIELD_BEARING` 중 무엇인지 — verifyingContract가 갈린다
-2. **BSC USDT는 18 decimals** (이더리움의 6이 아님). `makerAmount` 자릿수를 틀리면
-   10¹² 배 주문이 나간다
-3. 최초 1회 온체인 승인 — USDT `approve`, ConditionalTokens `setApprovalForAll`
+1. Up/Down 마켓이 네 변종 중 무엇인지 — `CTF_EXCHANGE` / `NEG_RISK_CTF_EXCHANGE` /
+   `YIELD_BEARING_CTF_EXCHANGE` / `YIELD_BEARING_NEG_RISK_CTF_EXCHANGE`.
+   verifyingContract 가 갈린다. 마켓 메타데이터로 판별한다.
+2. `shareThreshold` 의 의미
+3. 주문 배치(batch)·수정(amend) 엔드포인트가 있는가 — 있으면 재호가 요청 수가
+   절반이 되어 500ms 쿨다운을 완화할 수 있다
+4. 최초 1회 온체인 승인 — `predictAccount` 가 설정되면 모든 승인이 `Kernel.execute`
+   로 라우팅된다. 승인 트랜잭션 가스는 Privy 지갑이 낸다.
+
+**SDK 로 이미 확정된 것**(더 이상 실측 대상이 아니다): chainId 56/97, 양쪽 체인의
+전체 주소표, USDT 18 decimals, 최소 수량 `1e16`, 가격·수량 유효숫자 절단 규칙,
+Kernel 서명 봉투 형식, `MAX_SALT = 2^31`.
 
 BUY 주문에서 `makerAmount`는 지불할 USDT, `takerAmount`는 받을 주식 수이고
 `가격 = makerAmount / takerAmount`다. 가격을 틱으로 정규화한 뒤 정수 연산으로만

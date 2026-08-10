@@ -18,20 +18,28 @@ func main() {
 	days := flag.Int("days", 30, "몇 일치 회차를 검사할지")
 	symbol := flag.String("symbol", "BTCUSDT", "바이낸스 심볼")
 	prefix := flag.String("prefix", "btc", "회차 슬러그 접두사")
+	// 리베이트 가치는 체결 가격에 따라 달라진다. 봇은 0.5 미만에서만 사므로
+	// 0.49 를 대표값으로 둔다. 가정이 드러나도록 상수가 아니라 플래그다.
+	fillPrice := flag.Float64("fill-price", 0.49, "리베이트 환산에 쓸 대표 체결가 (0<p<0.5)")
 	flag.Parse()
+
+	if *fillPrice <= 0 || *fillPrice >= 0.5 {
+		fmt.Fprintf(os.Stderr, "-fill-price 는 0 초과 0.5 미만이어야 한다 (받은 값 %g)\n", *fillPrice)
+		os.Exit(2)
+	}
 
 	key := os.Getenv("PREDICT_API_KEY")
 	if key == "" {
 		fmt.Fprintln(os.Stderr, "PREDICT_API_KEY 환경변수가 필요합니다")
 		os.Exit(2)
 	}
-	if err := run(key, *days, *symbol, *prefix); err != nil {
+	if err := run(key, *days, *symbol, *prefix, *fillPrice); err != nil {
 		fmt.Fprintln(os.Stderr, "실패:", err)
 		os.Exit(1)
 	}
 }
 
-func run(key string, days int, symbol, prefix string) error {
+func run(key string, days int, symbol, prefix string, fillPrice float64) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 	defer cancel()
 
@@ -102,15 +110,42 @@ func run(key string, days int, symbol, prefix string) error {
 
 	const baseEdge = 2.270  // %p — 문턱 0.0172 실측 52.270%
 	const dojiBias = -0.282 // %p — 도지 제외 낙관 편향
-	const rebate = 0.500    // %p — 메이커 리베이트
+
+	// 메이커 리베이트는 USDT 가 아니라 **반대편 주식**으로 지급된다
+	// (2026-08-09 사용자 확인). 확정된 규칙:
+	//   · 0.5% 는 **주식 수** 기준이다 — 명목 USDT 기준이 아니다.
+	//   · 체결 즉시 지급된다.
+	//   · 받은 주식은 회차 정산 때 함께 정산된다.
+	//
+	// 그래서 YES 를 가격 p 에 N 주 사면 NO 를 R = 0.005·N 주 받는다. CTF 이진
+	// 시장에서 YES+NO=1 이므로 NO 는 우리가 **질 때만** 값이 붙는다. 기대
+	// 기여분은 R·(1−q) = 0.005·N·(1−q) 이고, 명목 N·p 대비로 환산하면
+	//
+	//     0.005 · (1 − q) / p
+	//
+	// 현금 리베이트 가정(0.5% 를 그대로 더하기)보다 **낮다.** 우리 승률 q 가
+	// 시장가 p 가 함축하는 것보다 높기 때문이다 — 엣지가 좋을수록 리베이트를
+	// 덜 받는다. q=0.5227, p=0.49 에서 0.487%p 로 현금 가정 0.500 보다 0.013 낮다.
+	//
+	// 대신 손익과 음의 상관이라 드로다운을 줄이는 부분 헤지로 작동한다.
+	// 그 효과는 여기 기대값 표에 안 잡힌다(분산 이야기다).
+	const winRate = 0.5227        // 문턱 0.0172 실측 승률. baseEdge 와 같은 출처다.
+	const rebateShareFrac = 0.005 // 체결 주식 수의 0.5%
+	rebate := 100 * rebateShareFrac * (1 - winRate) / fillPrice
+
 	effective := baseEdge * (1 - 2*d)
-	total := effective + dojiBias + rebate
+	withoutRebate := effective + dojiBias
+	total := withoutRebate + rebate
 
 	fmt.Printf("  기대값 분해 (%%p)\n")
 	fmt.Printf("    기준 엣지          %+7.3f\n", baseEdge)
 	fmt.Printf("    정산 불일치 반영   %+7.3f   (× (1 − 2d))\n", effective-baseEdge)
 	fmt.Printf("    도지 제외 편향     %+7.3f\n", dojiBias)
-	fmt.Printf("    메이커 리베이트    %+7.3f\n", rebate)
+	fmt.Printf("    ─────────────────────────\n")
+	fmt.Printf("    리베이트 제외 소계 %+7.3f   ← 실측 기반\n", withoutRebate)
+	fmt.Printf("    메이커 리베이트    %+7.3f   ← 반대편 주식 0.5%%(주식 수), 체결가 %.3f 가정\n",
+		rebate, fillPrice)
+	fmt.Printf("                                 (현금 리베이트였다면 +0.500 — 질 때만 받으므로 낮다)\n")
 	fmt.Printf("    ─────────────────────────\n")
 	fmt.Printf("    합계               %+7.3f\n", total)
 	fmt.Println()
@@ -118,7 +153,14 @@ func run(key string, days int, symbol, prefix string) error {
 		fmt.Println("  판정: 실패 — 기대값이 0 이하다. P4 이후를 착수하지 않는다.")
 		return nil
 	}
+	if withoutRebate <= 0 {
+		fmt.Println("  판정: 조건부 통과 — 리베이트 가정에 **의존한다.**")
+		fmt.Printf("        리베이트를 빼면 %+.3f%%p 로 음수다. Task 10 이 리베이트\n", withoutRebate)
+		fmt.Println("        형태를 실측하기 전에는 실거래를 켜지 않는다.")
+		return nil
+	}
 	fmt.Println("  판정: 통과 — 다음 단계로 간다.")
+	fmt.Printf("        리베이트를 0 으로 놓아도 %+.3f%%p 라 부호가 안 뒤집힌다.\n", withoutRebate)
 	return nil
 }
 

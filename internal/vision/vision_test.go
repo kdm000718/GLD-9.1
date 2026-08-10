@@ -4,6 +4,8 @@ import (
 	"archive/zip"
 	"bytes"
 	"math"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
@@ -104,5 +106,39 @@ func TestToBarsAndDedup(t *testing.T) {
 	}
 	if b.Open[1] != 2 {
 		t.Errorf("중복 제거가 먼저 나온 행을 남기지 않았다: %v", b.Open[1])
+	}
+}
+
+func TestDecodeCacheRejectsTruncatedFile(t *testing.T) {
+	rows := [][11]float64{{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}, {12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22}}
+	full := encodeCache(rows)
+	// 한 행을 통째로 잘라낸다. 길이는 여전히 88 의 배수라 기존 검사를 통과한다.
+	short := full[:len(full)-88]
+	got, err := decodeCache(short)
+	if err != nil {
+		return // 길이 헤더가 있으면 여기서 걸린다 — 원하는 동작
+	}
+	if len(got) != len(rows) {
+		t.Fatalf("잘린 캐시를 %d행으로 읽었다(원본 %d행) — 에러 없이 통과했다", len(got), len(rows))
+	}
+}
+
+func TestWriteCacheAtomicLeavesNoPartialFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "monthly-2020-01.bin")
+	rows := [][11]float64{{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}}
+	if err := writeCacheAtomic(path, encodeCache(rows)); err != nil {
+		t.Fatal(err)
+	}
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ents) != 1 || ents[0].Name() != "monthly-2020-01.bin" {
+		var names []string
+		for _, e := range ents {
+			names = append(names, e.Name())
+		}
+		t.Fatalf("임시 파일이 남았다: %v", names)
 	}
 }

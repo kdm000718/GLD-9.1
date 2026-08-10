@@ -14,24 +14,16 @@ import (
 	"time"
 
 	"github.com/kdm000718/GLD-9.1/internal/bars"
-	"github.com/kdm000718/GLD-9.1/internal/clock"
 	"github.com/kdm000718/GLD-9.1/internal/features"
 	"github.com/kdm000718/GLD-9.1/internal/metrics"
 	"github.com/kdm000718/GLD-9.1/internal/model"
+	"github.com/kdm000718/GLD-9.1/internal/sample"
 	"github.com/kdm000718/GLD-9.1/internal/vision"
 	"github.com/kdm000718/GLD-9.1/internal/walkforward"
 )
 
 // refPath 는 -ref 로 덮어쓴다.
 var refPath string
-
-// 결측봉 방어: 예측에 실제로 쓰이는 최근 구간이 시간상 연속이어야 한다.
-const (
-	req1m  = 60
-	req5m  = 12
-	minMS  = 60_000
-	fiveMS = walkforward.FiveMinMS
-)
 
 func main() {
 	symbol := flag.String("symbol", "BTCUSDT", "심볼")
@@ -221,57 +213,11 @@ func logf(format string, args ...any) { fmt.Printf(format+"\n", args...) }
 // buildMatrix 는 +0분 표본을 행렬에 직접 채운다.
 // 표본이 100만 개 규모라 객체를 쌓지 않고 미리 잡은 행렬에 바로 쓴다.
 func buildMatrix(b1, b5 bars.Bars) ([]int64, *model.Matrix, []float64, error) {
-	n := b5.Len()
-	mat := model.NewMatrix(n, len(features.FeatureNames))
-	cs := make([]int64, n)
-	y := make([]float64, n)
-
-	kept := 0
-	skipDoji, skipWarmup, skipGap := 0, 0, 0
 	t0 := time.Now()
-
-	for i := 0; i < n; i++ {
-		t := b5.OpenTime[i]
-		o, c := b5.Open[i], b5.Close[i]
-		if c == o {
-			skipDoji++
-			continue
-		}
-		v, err := clock.New(t, b1, b5, t)
-		if err != nil {
-			// t 이전에 마감된 봉이 아예 없다 (데이터 시작부)
-			skipWarmup++
-			continue
-		}
-		if v.Bars1m.Len() < req1m || v.Bars5m.Len() < req5m {
-			skipWarmup++
-			continue
-		}
-		ot1, ot5 := v.Bars1m.OpenTime, v.Bars5m.OpenTime
-		l1, l5 := len(ot1), len(ot5)
-		if ot1[l1-1] != t-minMS ||
-			ot1[l1-1]-ot1[l1-req1m] != int64(req1m-1)*minMS ||
-			ot5[l5-1]-ot5[l5-req5m] != int64(req5m-1)*fiveMS {
-			skipGap++
-			continue
-		}
-		vals, ok := features.Build(v)
-		if !ok {
-			skipWarmup++
-			continue
-		}
-		mat.SetRow(kept, vals)
-		cs[kept] = t
-		if c > o {
-			y[kept] = 1
-		} else {
-			y[kept] = 0
-		}
-		kept++
-		if kept%200_000 == 0 {
-			fmt.Printf("    ... %d개 (%.0fs)\n", kept, time.Since(t0).Seconds())
-		}
-	}
+	cs, mat, y, counts := sample.Build(b1, b5, func(kept int) {
+		fmt.Printf("    ... %d개 (%.0fs)\n", kept, time.Since(t0).Seconds())
+	})
+	kept, skipDoji, skipWarmup, skipGap := counts.Kept, counts.Doji, counts.Warmup, counts.Gap
 	fmt.Printf("    표본 %d개  제외: 도지 %d / 워밍업 %d / 결측 %d  (%.0fs)\n",
 		kept, skipDoji, skipWarmup, skipGap, time.Since(t0).Seconds())
 
@@ -308,21 +254,20 @@ func buildMatrix(b1, b5 bars.Bars) ([]int64, *model.Matrix, []float64, error) {
 		return nil, nil, nil, fmt.Errorf(
 			"워밍업 제외 %d개, 기대 37 — clock.New 의 거부(t 이전에 마감된 봉이 없는 "+
 				"데이터 시작부), Bars1m/Bars5m 길이 하한(req1m=%d, req5m=%d), "+
-				"features.Build 의 거부 중 하나가 Python 과 다르다", skipWarmup, req1m, req5m)
+				"features.Build 의 거부 중 하나가 Python 과 다르다", skipWarmup, sample.Req1m, sample.Req5m)
 	}
 	if skipGap != 4_458 {
 		return nil, nil, nil, fmt.Errorf(
 			"결측 제외 %d개, 기대 4,458 — 연속성 조건 세 가지(1분봉 마지막 시각이 "+
 				"t-1분인지, 최근 %d개 1분봉이 끊김없이 이어지는지, 최근 %d개 5분봉이 "+
-				"끊김없이 이어지는지) 중 하나가 Python 과 다르다", skipGap, req1m, req5m)
+				"끊김없이 이어지는지) 중 하나가 Python 과 다르다", skipGap, sample.Req1m, sample.Req5m)
 	}
 	if kept != 932_491 {
 		return nil, nil, nil, fmt.Errorf(
 			"유지 표본 %d개, 기대 932,491 — 도지/워밍업/결측 판정 중 하나가 Python 과 다르다", kept)
 	}
 
-	mat.Truncate(kept)
-	return cs[:kept], mat, y[:kept], nil
+	return cs, mat, y, nil
 }
 
 // refPredictions 는 Python 참조 실행의 표본별 예측이다.

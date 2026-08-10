@@ -1,0 +1,254 @@
+[
+  {
+    "label": "eoa/ctf/prec2",
+    "kind": "eoa",
+    "domain": {
+      "name": "predict.fun CTF Exchange",
+      "version": "1",
+      "chainId": 56,
+      "verifyingContract": "0x8BC070BEdAB741406F4B1Eb65A72bee27894B689"
+    },
+    "order": {
+      "taker": "0x0000000000000000000000000000000000000000",
+      "tokenId": "123456789012345678901234567890123456789012345678901234567890",
+      "expiration": "0",
+      "nonce": "0",
+      "feeRateBps": "0",
+      "side": 0,
+      "signatureType": 0,
+      "salt": "10001",
+      "maker": "0x27000F84214f79B0600aa86841958b13ac98242a",
+      "signer": "0x27000F84214f79B0600aa86841958b13ac98242a",
+      "makerAmount": "980000000000000000",
+      "takerAmount": "2000000000000000000"
+    },
+    "orderDigest": "0xd5bdcefefe1179029f780caa3aaf12d24ee8c9c6718854e1cc324657f6757fcb",
+    "predictAccount": null,
+    "kernelDigest": null,
+    "signature": "0xa73a7b7d1b4763e9ada3cffba56b44df01f1af554305e07fcc5a8d76eae4a98f59d37b74c25d9e1d2a6a711b644238998a7f1450dfcaecac402be99e3ace3f4a1b"
+  },
+  {
+    "label": "eoa/ctf/prec3",
+    "kind": "eoa",
+    "domain": {
+      "name": "predict.fun CTF Exchange",
+      "version": "1",
+      "chainId": 56,
+      "verifyingContract": "0x8BC070BEdAB741406F4B1Eb65A72bee27894B689"
+    },
+    "order": {
+      "taker": "0x0000000000000000000000000000000000000000",
+      "tokenId": "123456789012345678901234567890123456789012345678901234567890",
+      "expiration": "0",
+      "nonce": "0",
+      "feeRateBps": "0",
+      "side": 0,
+      "signatureType": 0,
+      "salt": "10002",
+      "maker": "0x27000F84214f79B0600aa86841958b13ac98242a",
+      "signer": "0x27000F84214f79B0600aa86841958b13ac98242a",
+      "makerAmount": "998000000000000000",
+      "takerAmount": "2000000000000000000"
+    },
+    "orderDigest": "0x8312bde07fc3c2b573eed3bbed1620ff2bc369445181f391472c554d1ae51ce7",
+    "predictAccount": null,
+    "kernelDigest": null,
+    "signature": "0xe0f4adfdbaad37441f6484daeda0f9592be17038a8aa6fe41908f60a7997737c655d5ace2baa248384b48ed900ff54052b0d1f171f2da69218c11f65d8025abf1c"
+  },
+  {
+    "label": "eoa/negrisk/prec2",
+    "kind": "eoa",
+    "domain": {
+      "name": "predict.fun CTF Exchange",
+      "version": "1",
+      "chainId": 56,
+      "verifyingContract": "0x365fb81bd4A24D6303cd2F19c349dE6894D8d58A"
+    },
+    "order": {
+      "taker": "0x0000000000000000000000000000000000000000",
+      "tokenId": "123456789012345678901234567890123456789012345678901234567890",
+      "expiration": "0",
+      "nonce": "0",
+      "feeRateBps": "0",
+      "side": 0,
+      "signatureType": 0,
+      "salt": "10001",
+      "maker": "0x27000F84214f79B0600aa86841958b13ac98242a",
+      "signer": "0x27000F84214f79B0600aa86841958b13ac98242a",
+      "makerAmount": "980000000000000000",
+      "takerAmount": "2000000000000000000"
+    },
+    "orderDigest": "0x3bfec78a173fc9a050fb53e3cc03d286c6e0ac65ebbad2110567801c2d1795e8",
+    "predictAccount": null,
+    "kernelDigest": null,
+    "signature": "0x9bc00ac5622e6bed41241fc7f0188e668b4e91787f960076582da121a34f49b92d2c35dcf576226687ad9a262475ebabdf3add5f8257502e6c6776fe3af640cc1c"
+  },
+  {
+    "label": "eoa/ctf/large1000",
+    "kind": "eoa",
+    "domain": {
+      "name": "predict.fun CTF Exchange",
+      "version": "1",
+      "chainId": 56,
+      "verifyingContract": "0x8BC070BEdAB741406F4B1Eb65A72bee27894B689"
+    },
+    "order": {
+      "taker": "0x0000000000000000000000000000000000000000",
+      "tokenId": "123456789012345678901234567890123456789012345678901234567890",
+      "expiration": "0",
+      "nonce": "0",
+      "feeRateBps": "0",
+      "side": 0,
+      "signatureType": 0,
+      "salt": "10004",
+      "maker": "0x27000F84214f79B0600aa86841958b13ac98242a",
+      "signer": "0x27000F84214f79B0600aa86841958b13ac98242a",
+      "makerAmount": "490000000000000000000",
+      "takerAmount": "1000000000000000000000"
+    },
+    "orderDigest": "0xa5fd46f1c8d234c3da568ea2f22e3656d386dd2cc8cb6860373148ed85905a6f",
+    "predictAccount": null,
+    "kernelDigest": null,
+    "signature": "0x7656e1b73339fef03da22b937573a77106e7b987b8f93546b4d6e5af71b6b0be7e2f06c5e0f340a4c404d59c106819aaf09e6e62620525e466364cafdc83218a1b"
+  },
+  {
+    "label": "eoa/ctf/altsalt",
+    "kind": "eoa",
+    "domain": {
+      "name": "predict.fun CTF Exchange",
+      "version": "1",
+      "chainId": 56,
+      "verifyingContract": "0x8BC070BEdAB741406F4B1Eb65A72bee27894B689"
+    },
+    "order": {
+      "taker": "0x0000000000000000000000000000000000000000",
+      "tokenId": "123456789012345678901234567890123456789012345678901234567890",
+      "expiration": "0",
+      "nonce": "0",
+      "feeRateBps": "0",
+      "side": 0,
+      "signatureType": 0,
+      "salt": "99999",
+      "maker": "0x27000F84214f79B0600aa86841958b13ac98242a",
+      "signer": "0x27000F84214f79B0600aa86841958b13ac98242a",
+      "makerAmount": "980000000000000000",
+      "takerAmount": "2000000000000000000"
+    },
+    "orderDigest": "0x2debf3fff140796a1a50e7cc71d9d9708fd77f33dc5a41c330ef7781f2ad9668",
+    "predictAccount": null,
+    "kernelDigest": null,
+    "signature": "0xb774e150d352789853c509be84574bc3502e006e2d2b55587ccb4876b24d884d6dd28c74a68e085c86e6197b75b3ccaef74201e5deacaef677439dc7972696f61b"
+  },
+  {
+    "label": "predictAccount/chain56/acctA",
+    "kind": "predictAccount",
+    "domain": {
+      "name": "predict.fun CTF Exchange",
+      "version": "1",
+      "chainId": 56,
+      "verifyingContract": "0x8BC070BEdAB741406F4B1Eb65A72bee27894B689"
+    },
+    "order": {
+      "taker": "0x0000000000000000000000000000000000000000",
+      "tokenId": "123456789012345678901234567890123456789012345678901234567890",
+      "expiration": "0",
+      "nonce": "0",
+      "feeRateBps": "0",
+      "side": 0,
+      "signatureType": 0,
+      "salt": "20001",
+      "maker": "0x1111111111111111111111111111111111111111",
+      "signer": "0x1111111111111111111111111111111111111111",
+      "makerAmount": "980000000000000000",
+      "takerAmount": "2000000000000000000"
+    },
+    "orderDigest": "0xe0d85ebc20f3ecbc5254994a31494e534f41d4d1948dc6f7f57017127167090c",
+    "predictAccount": "0x1111111111111111111111111111111111111111",
+    "kernelDigest": "0x21362090da7c3ac715d0e2541d1666f526d89587969c02b0c7157e1b7e7f17f3",
+    "signature": "0x01845adb2c711129d4f3966735ed98a9f09fc4ce572fa836c86cc8d68b5fae34825592018613b5a8b5a778d63039420901cf70602a765b23d7d0e7454bd48632a5d09dbda6a997d44731657a6dd34a7d37d4a37a441b"
+  },
+  {
+    "label": "predictAccount/chain56/acctB",
+    "kind": "predictAccount",
+    "domain": {
+      "name": "predict.fun CTF Exchange",
+      "version": "1",
+      "chainId": 56,
+      "verifyingContract": "0x8BC070BEdAB741406F4B1Eb65A72bee27894B689"
+    },
+    "order": {
+      "taker": "0x0000000000000000000000000000000000000000",
+      "tokenId": "123456789012345678901234567890123456789012345678901234567890",
+      "expiration": "0",
+      "nonce": "0",
+      "feeRateBps": "0",
+      "side": 0,
+      "signatureType": 0,
+      "salt": "20001",
+      "maker": "0x2222222222222222222222222222222222222222",
+      "signer": "0x2222222222222222222222222222222222222222",
+      "makerAmount": "980000000000000000",
+      "takerAmount": "2000000000000000000"
+    },
+    "orderDigest": "0x66c1cdf1ee001a938771cc42a4b16b4fdc98f83f96f7f8e09f557532bb0e5f00",
+    "predictAccount": "0x2222222222222222222222222222222222222222",
+    "kernelDigest": "0xd2de11b77533675d14fd928a92b1c6302395f643f62a0203c565fbb6d5810ec6",
+    "signature": "0x01845adb2c711129d4f3966735ed98a9f09fc4ce57041675d0f59e62017291fc678736a1ee0fa8a50efdd1dd179e6eed25d470335307835b9f3bf008d703e012f57c8a8c9d2fc536ca8c374b96259042c5c16954811c"
+  },
+  {
+    "label": "predictAccount/chain97/acctA",
+    "kind": "predictAccount",
+    "domain": {
+      "name": "predict.fun CTF Exchange",
+      "version": "1",
+      "chainId": 97,
+      "verifyingContract": "0x2A6413639BD3d73a20ed8C95F634Ce198ABbd2d7"
+    },
+    "order": {
+      "taker": "0x0000000000000000000000000000000000000000",
+      "tokenId": "123456789012345678901234567890123456789012345678901234567890",
+      "expiration": "0",
+      "nonce": "0",
+      "feeRateBps": "0",
+      "side": 0,
+      "signatureType": 0,
+      "salt": "20001",
+      "maker": "0x1111111111111111111111111111111111111111",
+      "signer": "0x1111111111111111111111111111111111111111",
+      "makerAmount": "980000000000000000",
+      "takerAmount": "2000000000000000000"
+    },
+    "orderDigest": "0x218d18bda710c1869e5f379ea3fe4fbf28ab9356a01dd0dc9eea253ea67349ca",
+    "predictAccount": "0x1111111111111111111111111111111111111111",
+    "kernelDigest": "0x397d68dc7731266a29fb76240458c824f3c4834863fe6506bf8a16ff09d03061",
+    "signature": "0x01845adb2c711129d4f3966735ed98a9f09fc4ce57d87f320d217df3740e266ad2ae9e8dddaa7d40e2c9beda06add2e83f60a0d07e0ca150194dcec4c6b6464d0dd7692eefe17d1246c6f0b6ad3dcd53ff7bedc5151c"
+  },
+  {
+    "label": "predictAccount/chain56/acctA-envelope",
+    "kind": "predictAccount",
+    "domain": {
+      "name": "predict.fun CTF Exchange",
+      "version": "1",
+      "chainId": 56,
+      "verifyingContract": "0x8BC070BEdAB741406F4B1Eb65A72bee27894B689"
+    },
+    "order": {
+      "taker": "0x0000000000000000000000000000000000000000",
+      "tokenId": "123456789012345678901234567890123456789012345678901234567890",
+      "expiration": "0",
+      "nonce": "0",
+      "feeRateBps": "0",
+      "side": 0,
+      "signatureType": 0,
+      "salt": "20009",
+      "maker": "0x1111111111111111111111111111111111111111",
+      "signer": "0x1111111111111111111111111111111111111111",
+      "makerAmount": "490000000000000000000",
+      "takerAmount": "1000000000000000000000"
+    },
+    "orderDigest": "0x4fed20b2078f7676e00581a889bb5ec20290d45a46315e240145089a89b91630",
+    "predictAccount": "0x1111111111111111111111111111111111111111",
+    "kernelDigest": "0xfcf68829dc262ce9968c34952ac0891f632f8f98b6a99f452540951d48b82c1f",
+    "signature": "0x01845adb2c711129d4f3966735ed98a9f09fc4ce57ea499b72930f3249137a8429db1bfbf746e92e2670022ad51d00d576885878847b137a1d0ef35e0ac2836864ea6baea1394c25d4bd7bf1344870d19be8e1cdf01c"
+  }
+]
