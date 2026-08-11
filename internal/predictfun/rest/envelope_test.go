@@ -95,3 +95,49 @@ func TestRemoveOrdersWrapsIdsInData(t *testing.T) {
 		t.Fatalf("data.ids = %v, want [a b]", sent.Data.IDs)
 	}
 }
+
+// TestRemoveOrdersReadsTopLevelBuckets 는 2026-08-11 실측 응답 그대로다.
+//
+//	{"noop":[],"rejected":[],"removed":["2024255677"],"success":true}
+//
+// 이 엔드포인트는 봉투를 쓰지 않는다. `data` 만 보고 있었더니 실제로 취소된
+// 주문이 Unaccounted 로 떨어졌고, 회차 종료 검사가 걸려 봇이 **매 회차 끝에
+// 거래를 중단했다** — 거래소에는 아무것도 남아 있지 않았는데도.
+func TestRemoveOrdersReadsTopLevelBuckets(t *testing.T) {
+	c, _ := capture(t, 200, `{"noop":[],"rejected":[],"removed":["2024255677"],"success":true}`)
+	res, err := c.RemoveOrders(context.Background(), []string{"2024255677"})
+	if err != nil {
+		t.Fatalf("RemoveOrders: %v", err)
+	}
+	if len(res.Removed) != 1 || res.Removed[0] != "2024255677" {
+		t.Fatalf("Removed = %v — 최상위 버킷을 못 읽었다", res.Removed)
+	}
+	if len(res.Unaccounted) != 0 {
+		t.Fatalf("Unaccounted = %v — 취소된 주문을 '살아 있을지 모른다' 로 읽었다", res.Unaccounted)
+	}
+}
+
+// 거래소가 어느 날 봉투를 씌워도 조용히 깨지지 않아야 한다.
+func TestRemoveOrdersStillReadsWrappedBuckets(t *testing.T) {
+	c, _ := capture(t, 200, `{"success":true,"data":{"removed":["a"],"noop":["b"],"rejected":[]}}`)
+	res, err := c.RemoveOrders(context.Background(), []string{"a", "b"})
+	if err != nil {
+		t.Fatalf("RemoveOrders: %v", err)
+	}
+	if len(res.Removed) != 1 || len(res.Noop) != 1 || len(res.Unaccounted) != 0 {
+		t.Fatalf("봉투 형태를 못 읽었다: %+v", res)
+	}
+}
+
+// 어느 자리에도 없는 id 는 여전히 Unaccounted 다 — 그 판정이 사라지면
+// 잊힌 매수 주문이 생긴다.
+func TestRemoveOrdersStillFlagsMissingIDs(t *testing.T) {
+	c, _ := capture(t, 200, `{"removed":["a"],"noop":[],"rejected":[],"success":true}`)
+	res, err := c.RemoveOrders(context.Background(), []string{"a", "ghost"})
+	if err != nil {
+		t.Fatalf("RemoveOrders: %v", err)
+	}
+	if len(res.Unaccounted) != 1 || res.Unaccounted[0] != "ghost" {
+		t.Fatalf("Unaccounted = %v, want [ghost]", res.Unaccounted)
+	}
+}

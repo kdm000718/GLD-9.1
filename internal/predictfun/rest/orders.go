@@ -298,13 +298,41 @@ type RemoveResult struct {
 	Unaccounted []string
 }
 
+// removeOrdersResponse 는 **두 자리를 모두 본다.**
+//
+// 이 엔드포인트는 봉투를 쓰지 않는다 — 버킷이 최상위에 있다(2026-08-11 실측):
+//
+//	{"noop":[],"rejected":[],"removed":["2024255677"],"success":true}
+//
+// 생성 쪽(`POST /v1/orders`)은 `data` 안에 넣는데 취소 쪽은 그렇지 않다.
+// 같은 API 안에서 갈린다.
+//
+// `data` 만 보고 있었던 결과가 컸다: 실제로 취소된 주문이 Removed 에 안 잡히고
+// 전부 Unaccounted 로 떨어졌다. 회차 종료 검사가 "취소를 확인하지 못했다" 로
+// 걸리고, 봇이 매 회차 끝에 거래를 중단했다 — 거래소에는 아무것도 남아 있지
+// 않았는데도.
+//
+// **둘 다 읽고 합친다.** 거래소가 어느 날 봉투를 씌우기로 해도 조용히 깨지지
+// 않는다. 이 경로에서 "못 읽었다" 는 곧 "살아 있을지 모르는 주문" 이고, 그
+// 오판의 비용이 파싱을 관대하게 두는 비용보다 훨씬 크다.
 type removeOrdersResponse struct {
 	envelopeMeta
-	Data struct {
-		Removed  []flexString `json:"removed"`
-		Noop     []flexString `json:"noop"`
-		Rejected []flexString `json:"rejected"`
-	} `json:"data"`
+	removeBuckets
+	Data removeBuckets `json:"data"`
+}
+
+type removeBuckets struct {
+	Removed  []flexString `json:"removed"`
+	Noop     []flexString `json:"noop"`
+	Rejected []flexString `json:"rejected"`
+}
+
+// merge 는 최상위와 data 를 합친다. 한쪽만 채워지는 것이 정상이다.
+func (r removeOrdersResponse) merge() (removed, noop, rejected []string) {
+	removed = append(flatten(r.Removed), flatten(r.Data.Removed)...)
+	noop = append(flatten(r.Noop), flatten(r.Data.Noop)...)
+	rejected = append(flatten(r.Rejected), flatten(r.Data.Rejected)...)
+	return
 }
 
 // RemoveOrders 는 주문 ID 들을 한 요청으로 취소한다.
@@ -340,11 +368,8 @@ func (c *Client) RemoveOrders(ctx context.Context, ids []string) (RemoveResult, 
 		return RemoveResult{}, fmt.Errorf("주문 취소 실패: %w", err)
 	}
 
-	res := RemoveResult{
-		Removed:  flatten(resp.Data.Removed),
-		Noop:     flatten(resp.Data.Noop),
-		Rejected: flatten(resp.Data.Rejected),
-	}
+	rm, np, rj := resp.merge()
+	res := RemoveResult{Removed: rm, Noop: np, Rejected: rj}
 	seen := make(map[string]bool, len(ids))
 	for _, group := range [][]string{res.Removed, res.Noop, res.Rejected} {
 		for _, id := range group {
