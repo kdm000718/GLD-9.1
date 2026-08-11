@@ -5,6 +5,7 @@
 package auth
 
 import (
+	"errors"
 	"context"
 	"crypto/ecdsa"
 	"encoding/base64"
@@ -66,6 +67,38 @@ type Authenticator struct {
 	Rest   *rest.Client
 	Signer *Signer
 
+	// Account 와 SignMessage 는 **스마트계정으로 세션을 맺을 때** 채운다.
+	//
+	// # 왜 필요한가 — 자금이 있는 쪽으로 인증해야 한다
+	//
+	// predict.fun 계정은 두 종류다. 평범한 EOA 지갑이면 이 둘을 비워 두면
+	// 되고, 그때 세션은 키의 EOA 로 맺어진다. 그러나 **Predict Account
+	// (ZeroDev Kernel 스마트계정)** 를 쓰면 담보는 그 계정에 있고 키의 EOA
+	// 에는 아무것도 없다.
+	//
+	// 거래소의 `POST /v1/orders` 는 두 가지를 동시에 요구한다(2026-08-11 실측):
+	//
+	//	① maker == signer            (create_order_maker_signer_mismatch)
+	//	② signer == 인증된 주소        (Authenticated signer does not match…)
+	//
+	// 합치면 `maker == signer == 인증 주소` 다. 담보가 스마트계정에 있으므로
+	// **세션도 스마트계정으로 맺어야** 한다. signatureType 을 1·2 로 바꿔
+	// maker≠signer 를 허용받으려는 시도는 전부 같은 400 으로 기각됐다.
+	//
+	// # 서명은 그냥 EOA 서명이 아니다
+	//
+	// 스마트계정 주소로 인증하면서 평문 65바이트 서명을 보내면 401
+	// `invalid signature` 다. 계정 컨트랙트가 ERC-1271 로 검증하므로
+	// **Kernel 봉투**(`0x01 ‖ 검증자 ‖ sig65`, 86바이트)를 보내야 한다.
+	// 그 봉투를 만드는 함수는 `internal/predictfun/order` 에 있는데 그쪽이
+	// 이 패키지를 임포트하므로(SignEOA), 여기서 부르면 순환이 된다. 그래서
+	// **함수로 받는다** — 배선(cmd/gld91)이 꽂아 준다.
+	//
+	// 둘 중 하나만 채우면 에러다. 계정만 있고 서명 방법이 없으면 평문 서명이
+	// 나가 401 이 되고, 그 401 은 "키가 틀렸다"처럼 보인다.
+	Account     string
+	SignMessage func(textHash []byte) ([]byte, error)
+
 	mu      sync.Mutex
 	token   string
 	expires time.Time
@@ -125,7 +158,18 @@ func (a *Authenticator) Token(ctx context.Context) (string, error) {
 	}
 
 	// personal_sign 관례: "Ethereum Signed Message:\n<len><msg>" 를 keccak 한다.
-	sig, err := a.Signer.SignHash(accounts.TextHash([]byte(msg)))
+	textHash := accounts.TextHash([]byte(msg))
+
+	// 세션 주체를 정한다. 스마트계정이면 그 주소로 맺고 서명도 봉투로 한다.
+	who := a.Signer.Address().Hex()
+	signFn := a.Signer.SignHash
+	if a.Account != "" || a.SignMessage != nil {
+		if a.Account == "" || a.SignMessage == nil {
+			return "", errors.New("스마트계정 인증에는 Account 와 SignMessage 가 **둘 다** 필요하다 — 하나만 채우면 평문 서명이 나가 401 이 된다")
+		}
+		who, signFn = a.Account, a.SignMessage
+	}
+	sig, err := signFn(textHash)
 	if err != nil {
 		return "", err
 	}
@@ -133,7 +177,7 @@ func (a *Authenticator) Token(ctx context.Context) (string, error) {
 	var jwtResp map[string]any
 	// 경로 /v1/auth, 필드명 signer — Task 10 실측(위 Token() 주석 참고).
 	if err := a.Rest.Post(ctx, "/v1/auth", map[string]any{
-		"signer":    a.Signer.Address().Hex(),
+		"signer":    who,
 		"message":   msg,
 		"signature": "0x" + hex.EncodeToString(sig),
 	}, &jwtResp); err != nil {

@@ -122,20 +122,15 @@ func TestDryRunStillSigns(t *testing.T) {
 	if sig, _ := o["signature"].(string); sig != "0x"+hex.EncodeToString(envelope) {
 		t.Errorf("본문의 서명이 봉투와 다르다")
 	}
-	// **maker 와 signer 는 다르다.** ERC-4337 계정은 자기 키가 없다 — 담보는
-	// 스마트계정에 있고 서명은 등록된 EOA 가 한다.
-	//
-	// 이 단언이 예전에 `maker == signer` 였고, 그것이 2026-08-11 무장 실패가
-	// 시험을 통과한 채로 지나온 이유다. 거래소는 401 로 답했다:
-	// "Authenticated signer does not match the order signer".
+	// **maker == signer == PREDICT_ACCOUNT**, 그리고 인증 세션도 같은 주소다.
+	// 거래소는 `maker == signer` 를 무조건 요구하고(signatureType 0·1·2 모두),
+	// 동시에 signer 가 인증 주소와 같기를 요구한다. 담보가 스마트계정에 있으니
+	// 셋 다 그 주소여야 한다(2026-08-11 실측).
+	if o["maker"] != o["signer"] {
+		t.Errorf("maker(%v) 와 signer(%v) 가 다르다 — 거래소가 400 으로 거부한다", o["maker"], o["signer"])
+	}
 	if !strings.EqualFold(o["maker"].(string), fixtureAccount) {
 		t.Errorf("maker 가 PREDICT_ACCOUNT 가 아니다: %v — 자금은 스마트계정에 있다", o["maker"])
-	}
-	if strings.EqualFold(o["signer"].(string), fixtureAccount) {
-		t.Errorf("signer 가 스마트계정이다(%v) — 인증 세션은 EOA 로 맺어지므로 401 이 된다", o["signer"])
-	}
-	if !strings.EqualFold(o["signer"].(string), fixtureSignerEOA) {
-		t.Errorf("signer(%v) 가 키에서 유도된 EOA(%v) 가 아니다", o["signer"], fixtureSignerEOA)
 	}
 	if o["side"] != uint8(0) {
 		t.Errorf("side = %v, 기대 0(BUY) — 이 봇은 매도 주문을 내지 않는다", o["side"])

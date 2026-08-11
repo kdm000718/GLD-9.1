@@ -119,7 +119,22 @@ func run(cfg *Config) error {
 
 	rc := rest.New(secrets.APIKey)
 	rc.BaseURL = cfg.RestBaseURL
-	rc.SetTokenSource(&auth.Authenticator{Rest: rc, Signer: signer})
+	// **세션을 스마트계정으로 맺는다.** EOA 로 맺으면 주문의 signer 와 인증
+	// 주소가 갈려 거래소가 401 로 거부한다 — 그리고 담보는 스마트계정에 있다
+	// (auth.Authenticator.Account 의 주석에 실측 근거가 있다).
+	//
+	// 서명은 EOA 키가 하되 Kernel 봉투로 감싼다. 계정 컨트랙트가 ERC-1271 로
+	// 검증하므로 평문 65바이트 서명은 401 `invalid signature` 다.
+	rc.SetTokenSource(&auth.Authenticator{
+		Rest:    rc,
+		Signer:  signer,
+		Account: secrets.Account,
+		SignMessage: func(textHash []byte) ([]byte, error) {
+			return order.SignForPredictAccount(textHash, cfg.ChainID,
+				common.HexToAddress(secrets.Account),
+				common.HexToAddress(cfg.Validator), signer)
+		},
+	})
 	// **계정 주소가 쿼리 문자열에 실린다** — 체결 조회가 signerAddress 로
 	// 서버 측 필터를 건다(fills.go). 전송이 실패하면 net/http 는 *url.Error 에
 	// 전체 URL 을 그대로 싣고, 그 에러는 이 바이너리의 로그로 나간다. 이

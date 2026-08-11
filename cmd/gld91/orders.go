@@ -259,29 +259,28 @@ func (s *orderSender) build(r exec.Request) (body map[string]any, envelope []byt
 		return nil, nil, err
 	}
 
-	// **maker 와 signer 는 다른 주소다.**
+	// **maker == signer == 스마트계정이다.** 그리고 인증 세션도 같은 주소로
+	// 맺어야 한다(auth.Authenticator.Account 참고).
 	//
-	//	maker  = 담보를 들고 있는 스마트계정(PREDICT_ACCOUNT)
-	//	signer = 그 계정에 등록된 EOA — 우리 키가 유도하는 주소
+	// 거래소가 요구하는 두 조건을 2026-08-11 실측으로 확정했다:
 	//
-	// ERC-4337 계정은 자기 키가 없다. 서명은 등록된 EOA 가 하고, 그래서
-	// ContractOrder 에 두 필드가 따로 있다. 둘을 같게 넣으면 거래소는 401 로
-	// 답한다(2026-08-11 실측):
+	//	① maker == signer            (create_order_maker_signer_mismatch)
+	//	② signer == 인증된 주소        (Authenticated signer does not match…)
 	//
-	//	Authenticated signer does not match the order signer
+	// 합치면 셋이 모두 같아야 한다. 담보는 스마트계정에 있으므로 그 주소여야
+	// 하고, 그래서 세션도 스마트계정으로 맺는다.
 	//
-	// 인증 세션은 키의 EOA 로 맺어지는데(`POST /v1/auth` 가 그 키로 서명한다)
-	// 주문의 signer 는 스마트계정이었으니 둘이 갈렸다. 무장 시도 240건이
-	// 전부 이 401 이었다 — 주문은 하나도 생성되지 않았다.
+	// **signatureType 으로 maker≠signer 를 허용받을 수 없다.** 0·1·2 를 각각
+	// 보내 봤고 셋 다 같은 400 이었다. 이 엔드포인트는 무조건 둘이 같기를
+	// 요구한다.
 	//
-	// **maker 를 EOA 로 바꿔서 고치면 안 된다.** 그쪽에는 자금이 없어서 주문이
-	// 통과해도 체결되지 않는다(P4 실측). 자금은 스마트계정에 있다.
-	// `cmd/signercheck` 가 이 둘의 관계(EOA 가 그 계정의 등록 서명자인가)를
-	// 체인에서 대조하고, 기동 자가 점검 2/5 가 같은 함수를 부른다.
+	// **maker 를 EOA 로 바꿔서 고치면 안 된다.** 그쪽에는 자금이 없다(P4 실측).
+	// 서명은 EOA 키가 하되 Kernel 봉투로 감싸고, 계정 컨트랙트가 ERC-1271 로
+	// 검증한다 — 그래서 signatureType 은 0 이다.
 	o := order.Order{
 		Salt:    salt,
 		Maker:   s.Account.Hex(),
-		Signer:  s.Signer.Address().Hex(),
+		Signer:  s.Account.Hex(),
 		Taker:   zeroAddress,
 		TokenID: tokenID,
 
