@@ -4,11 +4,13 @@
 // 게이트 러너이고 cmd/train 은 실거래 모델을 만드는데, 둘이 서로 다른 표본 집합을
 // 보면 게이트가 검증한 적 없는 모델이 실거래에 나간다 — 게이트는 backtest 쪽만
 // 돌리므로 어긋나도 통과한다. 그래서 규칙을 한 곳에 둔다.
+//
+// 서빙(실거래)도 같은 이유로 여기를 지난다. 규칙은 Features(serve.go) 하나에만
+// 있고 Build 가 그것을 부른다 — 학습 표본과 서빙 입력이 갈릴 자리가 없다.
 package sample
 
 import (
 	"github.com/kdm000718/GLD-9.1/internal/bars"
-	"github.com/kdm000718/GLD-9.1/internal/clock"
 	"github.com/kdm000718/GLD-9.1/internal/features"
 	"github.com/kdm000718/GLD-9.1/internal/model"
 	"github.com/kdm000718/GLD-9.1/internal/walkforward"
@@ -49,28 +51,20 @@ func Build(b1, b5 bars.Bars, progress func(kept int)) ([]int64, *model.Matrix, [
 			c.Doji++
 			continue
 		}
-		v, err := clock.New(t, b1, b5, t)
-		if err != nil {
-			// t 이전에 마감된 봉이 아예 없다 (데이터 시작부)
+		// 자격 검사는 Features 하나에만 있다 — 서빙도 같은 함수를 부른다.
+		vals, reason := Features(b1, b5, t)
+		switch reason {
+		case Eligible:
+		case Warmup:
 			c.Warmup++
 			continue
-		}
-		if v.Bars1m.Len() < Req1m || v.Bars5m.Len() < Req5m {
-			c.Warmup++
-			continue
-		}
-		ot1, ot5 := v.Bars1m.OpenTime, v.Bars5m.OpenTime
-		l1, l5 := len(ot1), len(ot5)
-		if ot1[l1-1] != t-minMS ||
-			ot1[l1-1]-ot1[l1-Req1m] != int64(Req1m-1)*minMS ||
-			ot5[l5-1]-ot5[l5-Req5m] != int64(Req5m-1)*fiveMS {
+		case Gap:
 			c.Gap++
 			continue
-		}
-		vals, ok := features.Build(v)
-		if !ok {
-			c.Warmup++
-			continue
+		default:
+			// Reason 이 늘었는데 여기를 안 고치면 Counts 의 분할 불변식이
+			// 조용히 깨진다 — 그 봉은 어느 사유로도 세어지지 않는다.
+			panic("sample.Build: 알 수 없는 사유 " + reason.String())
 		}
 		mat.SetRow(c.Kept, vals)
 		cs[c.Kept] = t

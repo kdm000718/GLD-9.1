@@ -5,127 +5,24 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
-	"net/url"
 	"sort"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/kdm000718/GLD-9.1/internal/live"
 	"github.com/kdm000718/GLD-9.1/internal/predictfun/rest"
 	"github.com/kdm000718/GLD-9.1/internal/predictfun/ws"
 	"github.com/kdm000718/GLD-9.1/internal/timing"
 )
 
-// --- /v1/categories 응답 파싱 (읽기 진단용, 이 마켓의 전체 필드) ---
+// 회차 선택(카테고리 조회·시각 창)은 internal/live 에 있다.
 //
-// internal/predictfun/rest/categories.go의 categoryPage는 정산된(RESOLVED)
-// 회차의 시작/종료가만 뽑도록 좁혀져 있어(unexported), decimalPrecision·
-// shareThreshold·outcomes 같은 필드가 없다. 여기서는 OPEN 회차의 마켓
-// 메타데이터 전체가 필요하므로 별도 타입을 둔다 — 진단 전용이라 internal
-// 패키지를 건드리지 않는다.
-type categoryPage struct {
-	Success bool       `json:"success"`
-	Cursor  *string    `json:"cursor"`
-	Data    []category `json:"data"`
-}
-
-type category struct {
-	ID       int64    `json:"id"`
-	Slug     string   `json:"slug"`
-	Status   string   `json:"status"`
-	StartsAt string   `json:"startsAt"`
-	EndsAt   string   `json:"endsAt"`
-	Markets  []market `json:"markets"`
-}
-
-type market struct {
-	ID               int64     `json:"id"`
-	Status           string    `json:"status"`
-	TradingStatus    string    `json:"tradingStatus"`
-	DecimalPrecision int       `json:"decimalPrecision"`
-	FeeRateBps       int       `json:"feeRateBps"`
-	ShareThreshold   int       `json:"shareThreshold"`
-	SpreadThreshold  float64   `json:"spreadThreshold"`
-	Outcomes         []outcome `json:"outcomes"`
-}
-
-type outcome struct {
-	Name      string `json:"name"`
-	IndexSet  int    `json:"indexSet"`
-	OnChainID string `json:"onChainId"`
-}
-
-// roundLookahead는 "아직 시작 안 했지만 곧 시작하는" 회차를 함께 잡는 창이다.
-// 회차가 시작하는 순간부터 프레임을 받으려면 시작 전에 구독이 끝나 있어야
-// 하는데, 폴링 간격(기본 20초)만큼의 여유는 있어야 한다.
-const roundLookahead = 60 * time.Second
-
-// fetchLiveRounds는 symbolPrefix(예: "btc")로 시작하는 5분 Up/Down 회차 중
-// **지금 진행 중인 것과 곧 시작할 것**을 돌려준다.
-//
-// **정렬이 핵심이다(2026-08-09 실측)**: predict.fun은 회차를 24시간 앞까지
-// 사전 등록해 둔다. status=OPEN 은 그 미래 회차도 전부 포함하므로,
-// PUBLISHED_AT_DESC(나중에 등록된 것 먼저)로 받으면 1페이지가 +23.1~23.9시간
-// 뒤 회차로 가득 차고 진행 중 회차에 닿으려면 24페이지쯤 들어가야 한다.
-// 앞선 소크가 진행 중 회차를 하나도 구독하지 못한 채 60분을 돈 원인이 이것이다.
-// PUBLISHED_AT_ASC 로 뒤집으면 "아직 안 끝난 것 중 가장 먼저 등록된 것"부터
-// 오므로 1페이지에 -0.07 ~ +0.68시간이 들어온다.
-// (STARTS_AT_ASC / ENDS_AT_ASC 는 400 — 서버가 받지 않는 sort 값이다.)
-//
-// 정렬만으로는 부족해서 시각 창으로 한 번 더 거른다: ASC 1페이지에도 최대
-// +0.68시간 뒤 회차까지 섞여 오기 때문이다. 그것들을 그대로 구독하면 회차 안
-// 시각 분포가 다시 "시작 전" 프레임으로 채워진다.
-//
-// 페이지네이션을 하지 않는 이유: 1페이지(first=50)에 btc-updown-5m-* 이
-// 10~13개 — 5분 회차 한 시간치다. 시각 창을 통과하는 것은 그중 한둘뿐이고,
-// 60분 소크 동안 새로 열리는 회차도 매 폴링에서 1페이지 안에 들어온다.
-func fetchLiveRounds(ctx context.Context, c *rest.Client, symbolPrefix string, now time.Time) ([]category, error) {
-	q := url.Values{}
-	q.Set("marketVariant", "CRYPTO_UP_DOWN")
-	q.Set("status", "OPEN")
-	q.Set("sort", "PUBLISHED_AT_ASC")
-	q.Set("first", "50")
-
-	var pg categoryPage
-	if err := c.Get(ctx, "/v1/categories", q, &pg); err != nil {
-		return nil, err
-	}
-
-	prefix := symbolPrefix + "-updown-5m-"
-	var out []category
-	for _, cat := range pg.Data {
-		if !strings.HasPrefix(cat.Slug, prefix) {
-			continue
-		}
-		if !roundIsLive(cat, now) {
-			continue
-		}
-		out = append(out, cat)
-	}
-	return out, nil
-}
-
-// roundIsLive는 회차가 "진행 중이거나 roundLookahead 안에 시작"하는지 본다.
-//
-// startsAt/endsAt 을 못 읽으면 **버린다**. 파싱 실패를 통과시키면 창이 없는
-// 것과 같아져서 미래 회차가 다시 전부 들어온다 — 걸러내려던 바로 그 실패
-// 모드다. 파싱 실패는 필드 이름이 바뀐 경우이므로, 조용히 통과시키는 것보다
-// 회차가 0개로 보여 눈에 띄는 편이 낫다.
-func roundIsLive(cat category, now time.Time) bool {
-	startsAt, err := time.Parse(time.RFC3339, cat.StartsAt)
-	if err != nil {
-		return false
-	}
-	endsAt, err := time.Parse(time.RFC3339, cat.EndsAt)
-	if err != nil {
-		return false
-	}
-	if !endsAt.After(now) {
-		return false // 이미 끝났다(API가 아직 OPEN으로 보여주더라도)
-	}
-	return !startsAt.After(now.Add(roundLookahead))
-}
+// 여기 있던 fetchLiveRounds/roundIsLive 를 그리로 옮겼다. 진단(probe)과
+// 실거래(gld91)가 서로 다른 회차 선택 규칙을 쓰면, 소크로 확인한 것이
+// 실거래가 하는 일과 다른 것이 된다 — PUBLISHED_AT_ASC + 시각 창이라는
+// 이 규칙 자체가 60분 소크 두 번을 헛돌게 한 실패에서 나온 것이라 더욱
+// 그렇다. 두 곳에 두면 갈린다.
 
 // --- 오더북 60분 소크 테스트 ---
 
@@ -241,7 +138,7 @@ func (s *readState) subscribeAll(ctx context.Context, sender ws.Sender) error {
 // pollOnce은 카테고리를 한 번 조회해 tracked 집합을 최신 OPEN 회차로 맞춘다.
 // 신규 회차는 구독하고, 더 이상 OPEN이 아닌 회차는 구독해제 후 제거한다.
 func (s *readState) pollOnce(ctx context.Context, rc *rest.Client, sender ws.Sender, symbolPrefix string, log *slog.Logger) {
-	cats, err := fetchLiveRounds(ctx, rc, symbolPrefix, time.Now())
+	cats, err := live.FetchCategories(ctx, rc, symbolPrefix, time.Now(), live.DefaultLookahead)
 	if err != nil {
 		log.Warn("카테고리 조회 실패", "err", err)
 		return
@@ -431,7 +328,7 @@ func runRead(parent context.Context, rc *rest.Client, symbolPrefix string, minut
 	fmt.Printf("[Step 1] REST 베이스 URL = %s\n", rc.BaseURL)
 
 	// 무키 확인: testnet은 x-api-key 없이 200을 받아야 한다.
-	probe, err := fetchLiveRounds(parent, rc, symbolPrefix, time.Now())
+	probe, err := live.FetchCategories(parent, rc, symbolPrefix, time.Now(), live.DefaultLookahead)
 	if err != nil {
 		return fmt.Errorf("초기 카테고리 조회 실패 — 설정을 다시 확인하라: %w", err)
 	}
@@ -439,7 +336,7 @@ func runRead(parent context.Context, rc *rest.Client, symbolPrefix string, minut
 	// mainnet은 실제로 x-api-key를 붙인다(main.go). 키 사용 여부는 위에서
 	// 이미 로그로 남겼다(rc.BaseURL로 어느 환경인지는 구분된다).
 	fmt.Printf("[Step 1] 카테고리 조회 성공, 진행 중(+%s 내 시작) %s-updown-5m-* 회차 %d개 발견\n",
-		roundLookahead, symbolPrefix, len(probe))
+		live.DefaultLookahead, symbolPrefix, len(probe))
 	if len(probe) == 0 {
 		fmt.Println("[Step 1] 경고: 진행 중 회차가 0개다 — 시각 창을 통과한 회차가 없다." +
 			" 소크는 계속하지만(다음 폴링에서 열릴 수 있다) 0이 계속되면 startsAt/endsAt 필드나 sort 값을 의심하라.")

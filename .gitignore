@@ -26,3 +26,8 @@ out/
 # 무시한다 — package.json 과 package-lock.json 은 커밋한다(골든 벡터를 다시
 # 만들 때 같은 버전이 나와야 한다).
 node_modules/
+
+# 빌드 산출물. `make monitor` 는 bin/ 에, 손으로 부른 go build 는 저장소 루트에
+# 떨군다. 커밋되면 아키텍처가 다른 기계에서 조용히 옛 바이너리가 돈다.
+bin/
+/gld91-monitor

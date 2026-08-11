@@ -139,6 +139,33 @@ GET  /v1/orders/matches       체결 이벤트 목록 (오더해시 최대 25개
   스펙 수준에서는 그 공백이 지금 메워졌다 — 아직 실제로 `POST /v1/orders`에
   보내본 적은 없다는 것은 여전하다(그건 Step 5).
 
+  > **정정 (2026-08-10, P5 Task 9).** 위 열두 개는 `ContractOrder`의
+  > **`required` 목록**이고, 스키마의 `properties`에는 두 개가 더 있다:
+  >
+  > ```
+  > hash       string  maxLength 66
+  > signature  string  maxLength 200
+  > ```
+  >
+  > **이 누락이 그대로 값을 치를 뻔했다.** 서명을 어디에 싣는지가 확인되지
+  > 않았다고 판단해 P5가 무장 차단 사유를 하나 더 들고 있었다. 실제 답은
+  > "`order` 객체 안"이고, 본문 최상위(`CreateOrderData`)에는 signature 자리가
+  > 아예 없다. 86바이트 봉투는 `0x` + 172자 = 174자로 `maxLength 200` 안에
+  > 들어간다. SDK도 같다 — `SignedOrder extends Order { signature: string }`
+  > (`tools/node_modules/@predictdotfun/sdk/dist/Types.d.ts`).
+  >
+  > 교훈은 스키마를 읽을 때 `required`만 보면 안 된다는 것이다. optional
+  > 필드가 빠지면 "그 필드가 없다"가 아니라 "그 필드를 우리가 못 봤다"이고,
+  > 둘은 정반대의 결론으로 이어진다.
+
+- **`Market` 스키마에 `isNegRisk` / `isYieldBearing`이 있다** (둘 다
+  `required`). 이 둘이 네 Exchange 계약 중 어느 것에 서명할지를 정한다 —
+  SDK의 `OrderBuilder.getExchangeIdentifier(isNegRisk, isYieldBearing)`와 같은
+  분기다. 2026-08-10 메인넷 실측에서 진행 중 `btc-updown-5m` 마켓은
+  `false / false` = `CTF_EXCHANGE`였다. **그 값을 상수로 박으면 안 된다**:
+  거래소가 이 상품을 negRisk로 옮기는 날 코드가 조용히 틀린 계약에 서명한다.
+  `internal/predictfun/order/exchange.go`가 회차마다 고른다.
+
 **주문 생성/취소 API 전체 목록** (스펙 그대로, `/v1/` 접두사 생략):
 
 ```
@@ -219,11 +246,79 @@ RPC=https://bsc-dataseed.binance.org
 **절차 재현성**: 팀리드 실행과 Task 10 재실행의 세 값이 완전히 동일했다. 이
 절차는 키·자금 없이, `curl` 세 번으로 몇 번이든 반복 가능하다.
 
-**미해결로 남는 것**: 위 `ecdsaValidatorStorage` 가 돌려주는 서명자 주소가 `WALLET_PRIVATE_KEY`의
-유도 주소와 일치하는지는 **아직 대조하지 못했다** — 그 환경변수가 비어 있다.
-실키가 채워지면 `crypto.PubkeyToAddress`로 유도한 주소를 이 값과 대조해야
-한다(주소만 출력, 키는 어떤 경로로도 출력하지 않는다). 다르면 그 키로 만든
-서명은 이 계정에 무효다.
+**~~미해결로 남는 것~~ → 닫혔다 (2026-08-10). 그리고 답은 "불일치" 였다.**
+
+`WALLET_PRIVATE_KEY` 가 채워져 대조했다. **키의 유도 EOA 와 계정의 등록
+서명자가 다르다.** 그 키로 만든 주문 서명은 이 계정에서 전부 거부된다 —
+`internal/predictfun/order` 와 G3 가 아무리 맞아도 그렇다. 서명 경로의
+정확성과 **서명 권한**은 별개 축이고, G3 는 전자만 증명한다.
+
+준비된 키는 메타마스크 지갑의 것이었고, predict.fun 계정의 서명자는
+그 서비스가 만든 Privy 내장지갑이다. 사용자에게는 이미 "메타마스크는 다른
+주소" 라는 인식이 있었지만, **그것이 서명 불가를 뜻한다는 연결은 이 대조를
+하고서야 드러났다.**
+
+**이 대조를 안 하고 Step 4 로 갔다면**: 온체인 승인 트랜잭션에 가스를 먼저
+쓰고, Step 5 의 첫 주문이 거부되고 나서야 원인을 찾기 시작했을 것이다.
+거부 사유가 "서명 불일치" 로 명확히 오지 않으면(스펙에 그런 보장이 없다)
+서명 구현부터 의심하며 며칠을 태울 수 있었다.
+
+**`cmd/signercheck` 로 자동화했다.** 키·계정을 환경변수에서 읽어 체인의
+`ecdsaValidatorStorage` 와 대조하고 종료 코드로 답한다(일치 0 / 불일치 1 /
+조회·설정 실패 2). 키는 어떤 경로로도 출력하지 않고 유도된 주소만 찍는다.
+
+```
+set -a; . ~/.config/predictfun/env; set +a
+GOTOOLCHAIN=local go run ./cmd/signercheck
+```
+
+**Step 4 의 선행 조건으로 못박는다** — 이 명령이 0 을 돌려주기 전에는 어떤
+온체인 트랜잭션도 보내지 않는다.
+
+**부수 실측(같은 날, BSC 메인넷)**: `$PREDICT_ACCOUNT` 의 BNB·USDT
+(`0x55d398…`) 잔고가 둘 다 0 이다. 등록 서명자 EOA 도 잔고 0·트랜잭션 0 건
+이다 — Privy 내장지갑이 오프체인 EIP-712 서명에만 쓰이고 직접 트랜잭션을
+보내지 않는다는 것과 부합한다. **Step 4~5 는 서명자 문제와 별개로 자금
+문제로도 막혀 있다.**
+
+### 해소 (같은 날 오후) — 계정을 바꾸고 서명 권한을 확보했다
+
+사용자가 predict.fun 에서 Privy 내장지갑 키를 내보내 교체했고, 이전 계정은
+폐기했다. `cmd/signercheck` 가 **✅ 일치**(종료 코드 0)를 돌려준다. 체인에서
+계정 구조도 재확인했다 — ERC-1967 프록시(코드 61바이트), 구현 슬롯이 스펙의
+`KERNEL` 주소와 일치, 등록 서명자가 우리 키의 EOA. **Task 8·9 의 86바이트
+Kernel 봉투 경로가 이 계정에 그대로 맞는다.**
+
+**남은 장애물은 자금 하나뿐이다** — 새 계정도 BNB·USDT 가 0 이다.
+
+### API 사실 — `/v1/account` 의 `address` 는 스마트계정이 아니다 (P5 가 반드시 알아야 한다)
+
+계정을 교체하는 과정에서 드러났다. **`GET /v1/account` 가 돌려주는 `address`
+는 인증한 지갑(서명자 EOA)이지 자금을 들고 있는 Kernel 스마트계정이 아니다.**
+새 키로 인증해 조회했더니 `address` 가 서명자 EOA 와 **글자 하나까지 같았고**,
+그 주소는 체인에서 코드 길이 0 인 평범한 EOA 였다.
+
+**P5 에 직접 걸리는 함정**: 주문의 `maker`/`signer` 자리에 이 값을 쓰면 안
+된다. `AccountData` 에 `address` 라는 필드가 하나뿐이라 "계정 주소" 로 읽히지만
+그렇지 않다. 이 값을 `maker` 에 넣으면 자금이 없는 EOA 로 주문이 나가고,
+거부되거나(운이 좋으면) 엉뚱한 주체로 기록된다.
+
+**`maker` 는 설정(`PREDICT_ACCOUNT`)에서만 온다. API 응답에서 유도하지 않는다.**
+
+스마트계정 주소를 돌려주는 엔드포인트는 **없다**. `/docs` 의 OpenAPI 스펙에
+있는 `/v1/*` 경로 32개를 전부 훑어 확인했다(`/v1/account`,
+`/v1/account/activity`, `/v1/account/points/weekly`, `/v1/account/referral`,
+`/v1/auth`, `/v1/auth/message`, `/v1/blocktrades*`, `/v1/categories*`,
+`/v1/languages`, `/v1/leaderboard`, `/v1/markets*`, `/v1/oauth/*`,
+`/v1/orders*`, `/v1/positions`, `/v1/search`, `/v1/tags`, `/v1/yield/pending`).
+스마트계정 주소는 **predict.fun 웹의 입금 화면에서 사람이 읽어 오는 수밖에
+없다** — 그래서 그 값이 설정 항목인 것이 맞다.
+
+**부수 확인**: 계정이 배포되기 전에는 `eth_getCode` 가 0 이고
+`ecdsaValidatorStorage` 도 0 주소다. ERC-4337 계정은 첫 입금·첫 주문 때
+배포되므로, 신규 계정에서 `signercheck` 가 "등록된 서명자가 없다" 로 나오면
+그것은 키가 틀린 것이 아니라 **계정이 아직 배포되지 않은 것**일 수 있다 —
+두 경우의 조치가 다르다(키 교체 vs 입금).
 
 ## Step 1 — testnet 설정 확인
 

@@ -40,4 +40,16 @@ align:
 # 게이트 셋을 순서대로. G2 는 PREDICT_API_KEY 가 필요하므로 뺐다.
 gates: goldencheck backtest
 
-.PHONY: build test vet goldencheck backtest align gates
+# ---- 감시(P6) ----
+
+# 모니터 바이너리. 배포 대상이 arm64 이면 `make monitor GOOS=linux GOARCH=arm64`.
+monitor:
+	go build -o bin/gld91-monitor ./cmd/gld91-monitor
+
+# 감시 경로만 골라 race 로 돌린다. 판정·래치·수신은 전부 동시성 위에 있고,
+# **감시 장치의 데이터 경합은 조용한 오작동으로 나타난다** — 알람이 안 나는
+# 쪽으로 틀리면 그 침묵이 정상과 구분되지 않는다. -count=1 은 캐시 무시다.
+monitor-soak:
+	go test -race -count=1 ./cmd/gld91-monitor/ ./cmd/gld91/ ./internal/beat/... ./internal/exec/
+
+.PHONY: build test vet goldencheck backtest align gates monitor monitor-soak

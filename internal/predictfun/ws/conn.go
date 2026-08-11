@@ -76,6 +76,31 @@ type Client struct {
 	// 재접속 횟수는 connects-1 이다(Reconnects 참고). 이 둘을 같은 값으로 쓰면
 	// 한 번도 안 끊긴 실행이 "재접속 1회"로 보고된다.
 	connects int64
+
+	// dataMu 는 lastDataAt 만 보호한다. mu 와 나누는 이유: mu 는 연결 교체
+	// 내내 잡혀 있고, lastDataAt 은 하트비트 스냅샷 경로에서 읽히므로 그
+	// 대기에 묶이면 감시가 봇의 재접속 시간만큼 멎는다.
+	dataMu     sync.Mutex
+	lastDataAt time.Time
+}
+
+// LastDataAt 은 마지막으로 받은 **마켓데이터** 프레임의 시각이다. 한 번도
+// 받지 못했으면 제로값이다.
+//
+// # 서버 하트비트는 세지 않는다
+//
+// 이 봇이 겪을 수 있는 가장 조용한 고장은 "연결은 살아 있는데 호가가 오지
+// 않는" 상태다. 서버 하트비트에 답하는 동안 연결은 건강해 보이고, TCP 도
+// 멀쩡하고, 재접속도 일어나지 않는다. 그래서 하트비트 프레임에서는 이 값을
+// 갱신하지 않는다 — 갱신하면 이 값이 재는 대상이 "연결이 살아 있는가" 로
+// 바뀌고, 그건 이미 [Client.Connected] 가 답하는 질문이다.
+//
+// `internal/beat/rule` 의 `ws_data` 규칙이 이 구별 위에 서 있다("WS
+// 마켓데이터 정체 (서버 하트비트는 살아 있다)").
+func (c *Client) LastDataAt() time.Time {
+	c.dataMu.Lock()
+	defer c.dataMu.Unlock()
+	return c.lastDataAt
 }
 
 func New(o Options) *Client {
@@ -354,6 +379,13 @@ func (c *Client) readLoop(ctx context.Context, cn *conn) error {
 			c.replyHeartbeat(ctx, msg)
 			continue
 		}
+
+		// 마켓데이터가 도착했다. **하트비트를 지나온 뒤에** 각인하는 것이
+		// 요점이다(LastDataAt 참고). OnFrame 배선 여부와 무관하게 기록한다 —
+		// 데이터는 왔고, 그 사실이 배선에 달려 있으면 안 된다.
+		c.dataMu.Lock()
+		c.lastDataAt = time.Unix(0, recvNs)
+		c.dataMu.Unlock()
 
 		if c.opt.OnFrame != nil {
 			c.opt.OnFrame(Frame{

@@ -35,7 +35,7 @@ func TestGapCountedAsGapNotWarmup(t *testing.T) {
 	}
 }
 
-// **직전 1분봉 인접 조건(sample.go 의 `ot1[l1-1] != t-minMS`)만이 잡는 케이스.**
+// **직전 1분봉 인접 조건(serve.go 의 `ot1[l1-1] != t-minMS`)만이 잡는 케이스.**
 //
 // 위 TestGapCountedAsGapNotWarmup 은 창 한가운데(Len()-30) 봉을 지운다 —
 // 그건 두 번째 조건(`ot1[l1-1]-ot1[l1-Req1m] != 59*minMS`, 60봉 창의 폭)이
@@ -71,7 +71,7 @@ func TestMissingImmediatelyPrecedingBarIsGap(t *testing.T) {
 
 	if after.Gap <= before.Gap {
 		t.Fatalf("직전 1분봉이 결측인데 결측으로 세지 않았다: %d → %d"+
-			" — sample.go 의 `ot1[l1-1] != t-minMS` 조건이 없어졌을 수 있다", before.Gap, after.Gap)
+			" — serve.go 의 `ot1[l1-1] != t-minMS` 조건이 없어졌을 수 있다", before.Gap, after.Gap)
 	}
 	if after.Warmup != before.Warmup {
 		t.Errorf("결측이 워밍업으로 세어졌다: %d → %d", before.Warmup, after.Warmup)

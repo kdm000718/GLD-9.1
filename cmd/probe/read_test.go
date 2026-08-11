@@ -118,76 +118,9 @@ func TestMarketGapsSingleFramePerMarketYieldsNoGaps(t *testing.T) {
 	}
 }
 
-func cat(slug, startsAt, endsAt string) category {
-	return category{Slug: slug, StartsAt: startsAt, EndsAt: endsAt}
-}
-
-// roundIsLive의 경계. now는 회차 하나의 한가운데로 잡는다.
-func TestRoundIsLive(t *testing.T) {
-	now := time.Date(2026, 8, 9, 12, 2, 30, 0, time.UTC)
-	rfc := func(t time.Time) string { return t.Format(time.RFC3339) }
-
-	cases := []struct {
-		name string
-		c    category
-		want bool
-	}{
-		{
-			"진행 중(12:00~12:05)",
-			cat("btc-updown-5m-1", rfc(now.Add(-150*time.Second)), rfc(now.Add(150*time.Second))),
-			true,
-		},
-		{
-			"막 시작(startsAt == now)",
-			cat("btc-updown-5m-2", rfc(now), rfc(now.Add(5*time.Minute))),
-			true,
-		},
-		{
-			"lookahead 안에 시작(+59초)",
-			cat("btc-updown-5m-3", rfc(now.Add(59*time.Second)), rfc(now.Add(59*time.Second+5*time.Minute))),
-			true,
-		},
-		{
-			"lookahead 경계에 시작(+60초)",
-			cat("btc-updown-5m-4", rfc(now.Add(roundLookahead)), rfc(now.Add(roundLookahead+5*time.Minute))),
-			true,
-		},
-		{
-			"lookahead 밖에 시작(+61초)",
-			cat("btc-updown-5m-5", rfc(now.Add(roundLookahead+time.Second)), rfc(now.Add(roundLookahead+time.Second+5*time.Minute))),
-			false,
-		},
-		{
-			"23시간 뒤 사전 등록 — 이것이 앞선 소크를 망친 표본",
-			cat("btc-updown-5m-6", rfc(now.Add(23*time.Hour)), rfc(now.Add(23*time.Hour+5*time.Minute))),
-			false,
-		},
-		{
-			"이미 끝남(endsAt == now)",
-			cat("btc-updown-5m-7", rfc(now.Add(-5*time.Minute)), rfc(now)),
-			false,
-		},
-		{
-			"이미 끝남(endsAt < now, API는 아직 OPEN)",
-			cat("btc-updown-5m-8", rfc(now.Add(-10*time.Minute)), rfc(now.Add(-5*time.Minute))),
-			false,
-		},
-		{
-			"1초 남음",
-			cat("btc-updown-5m-9", rfc(now.Add(-5*time.Minute)), rfc(now.Add(time.Second))),
-			true,
-		},
-		{"startsAt 파싱 실패는 버린다", cat("btc-updown-5m-a", "", rfc(now.Add(time.Minute))), false},
-		{"endsAt 파싱 실패는 버린다", cat("btc-updown-5m-b", rfc(now.Add(-time.Minute)), "nonsense"), false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := roundIsLive(tc.c, now); got != tc.want {
-				t.Errorf("roundIsLive(%+v) = %v, 기대 %v", tc.c, got, tc.want)
-			}
-		})
-	}
-}
+// roundIsLive 의 경계 테스트는 internal/live 로 함께 옮겼다
+// (TestIsLive). 함수가 그리로 갔는데 테스트만 여기 남기면, 여기 테스트는
+// probe 가 더 이상 쓰지 않는 규칙을 지키게 된다.
 
 // --- onFrame: 버려진 프레임이 계측을 오염시키지 않아야 한다 ---
 //
