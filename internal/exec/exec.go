@@ -500,6 +500,28 @@ func (st *roundState) filledSharesKnown() float64 {
 	return math.Max(st.filledShares, st.confirmedFilledShares)
 }
 
+// filledBaseline 은 **새 주문에 붙일 기준점**이다. 아는 체결에 더해, 아직
+// 답을 못 들은 주문이 **전량 찼다고** 가정한 몫까지 포함한다.
+//
+// # 왜 filledSharesKnown 으로는 부족한가
+//
+// 확인 대기 중인 주문 A(10주 @0.20, 명목 2.0)가 있고 그 사이에 B(5주 @0.48)를
+// 냈다고 하자. B 의 기준점이 0 이면, 나중에 A 의 10주가 체결 피드로 도착할 때
+// `10 − 0 ≥ 5` 가 되어 **한 주도 안 찬 B 가 전량 체결로 보인다.**
+// retireFullyFilled 가 B 를 추적에서 빼고, 아무도 B 를 취소하지 않는다 —
+// 잊힌 매수 주문은 체결된다.
+//
+// A 의 몫을 미리 얹어 두면 그 오귀속이 일어나지 않는다. A 가 실제로는 안
+// 찼을 때 B 가 물러나지 못하는 부작용이 남지만, 그쪽은 **덜 거는 방향**이고
+// B 는 회차 끝에 어차피 취소된다.
+func (st *roundState) filledBaseline() float64 {
+	base := st.filledSharesKnown()
+	for _, o := range st.confirming {
+		base += o.shares
+	}
+	return base
+}
+
 // fillEpsilon 은 주수 비교의 여유다. 거래소는 wei 정수를, 우리는 float 을
 // 들고 있어 마지막 자리가 갈릴 수 있다. 실측 체결은 9.000000 대 9 였지만
 // 그 일치에 기대지 않는다.
@@ -961,7 +983,7 @@ func (r *Runner) transmit(ctx context.Context, st *roundState, req Request, now 
 		id: res.ID, hash: res.Hash, tick: req.Tick.V, shares: req.Shares,
 		notional: req.Notional(), placed: now,
 		retryAt: retryAtFrom(res, now), lockUnknown: res.RemovalLockUnknown,
-		filledBefore: st.filledSharesKnown(),
+		filledBefore: st.filledBaseline(),
 	}
 	return nil
 }

@@ -5,6 +5,9 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/kdm000718/GLD-9.1/internal/ledger"
+	"github.com/kdm000718/GLD-9.1/internal/predictfun/order"
 )
 
 // 이 파일이 지키는 것: **"취소됐다"는 "안 찼다"가 아니다.**
@@ -373,3 +376,47 @@ var _ Orders = (*fakeOrders)(nil)
 // 아래 둘은 NaN/Inf 를 만드는 자리를 한 곳에 모은 것이다.
 func mathNaN() float64 { var z float64; return z / z }
 func mathInf() float64 { var z float64; return 1 / z }
+
+// TestUnresolvedOrderDoesNotRetireTheNextOne 은 자체 검토에서 나온 결함이다.
+//
+// 확인 대기 중인 A(10주)가 있는 동안 B(5주)를 냈는데, 나중에 A 의 10주가
+// 체결 피드로 도착하면 `10 − 0 ≥ 5` 로 **한 주도 안 찬 B 가 전량 체결로
+// 보인다.** 그러면 B 는 추적에서 사라지고 아무도 취소하지 않는다.
+func TestUnresolvedOrderDoesNotRetireTheNextOne(t *testing.T) {
+	h := newResolveHarness(t)
+	now := time.Unix(1786469767, 0)
+	// A: 10주 @0.20, 취소 확인됐지만 해시가 없어 물어볼 수 없다.
+	h.cancelled("A", "", 10, 2.0, now)
+
+	// 그 상태에서 B 를 **실제 경로로** 낸다. 기준점을 손으로 넣으면
+	// transmit 의 그 한 줄을 되돌려도 이 시험이 통과한다.
+	req := Request{Tick: order.NewTick(48, 2), Shares: 5, Outcome: ledger.OutcomeUp}
+	if err := h.r.transmit(context.Background(), h.st, req, now); err != nil {
+		t.Fatalf("transmit: %v", err)
+	}
+	if h.st.live == nil {
+		t.Fatal("주문이 걸리지 않았다")
+	}
+	if h.st.live.filledBefore != 10 {
+		t.Fatalf("새 주문의 기준점 %v, want 10 (확인 대기 A 의 10주를 포함해야 한다)",
+			h.st.live.filledBefore)
+	}
+
+	// A 의 10주가 피드로 도착한다.
+	h.st.filledShares += 10
+	h.st.retireFullyFilled()
+
+	if h.st.live == nil {
+		t.Fatal("한 주도 안 찬 B 가 전량 체결로 물러났다 — 아무도 B 를 취소하지 않는다")
+	}
+}
+
+// 확인 대기가 없으면 기준점은 그냥 아는 체결이다 — 정상 경로에서 새 주문이
+// 괜히 무거워지지 않아야 한다.
+func TestBaselineIsPlainWhenNothingIsPending(t *testing.T) {
+	h := newResolveHarness(t)
+	h.st.filledShares = 3
+	if got := h.st.filledBaseline(); got != 3 {
+		t.Fatalf("기준점 %v, want 3", got)
+	}
+}
