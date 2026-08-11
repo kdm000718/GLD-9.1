@@ -31,6 +31,10 @@ const (
 	fixtureAccount   = "0x1111222233334444555566667777888899990000"
 	fixtureExchange  = "0x8BC070BEdAB741406F4B1Eb65A72bee27894B689"
 	fixtureValidator = "0x845ADb2C711129d4f3966735eD98a9F09fC4cE57"
+	// fixtureSignerEOA 는 시험용 키(go-ethereum 공개 예시 키)가 유도하는
+	// 주소다. **fixtureAccount 와 달라야 한다** — 그 둘이 다르다는 것이
+	// 이 봇의 계정 구조이고, 같게 만들면 401 을 부른 그 버그로 돌아간다.
+	fixtureSignerEOA = "0x27000F84214f79B0600aa86841958b13ac98242a"
 )
 
 // forbiddenServer 는 불리면 테스트를 깨뜨리는 서버다. DRY-RUN 이 정말로
@@ -118,13 +122,20 @@ func TestDryRunStillSigns(t *testing.T) {
 	if sig, _ := o["signature"].(string); sig != "0x"+hex.EncodeToString(envelope) {
 		t.Errorf("본문의 서명이 봉투와 다르다")
 	}
-	// maker == signer == PREDICT_ACCOUNT. **API 응답에서 유도하면 안 된다** —
-	// GET /v1/account 의 address 는 서명자 EOA 이지 스마트계정이 아니다.
-	if o["maker"] != o["signer"] {
-		t.Errorf("maker(%v) 와 signer(%v) 가 다르다", o["maker"], o["signer"])
-	}
+	// **maker 와 signer 는 다르다.** ERC-4337 계정은 자기 키가 없다 — 담보는
+	// 스마트계정에 있고 서명은 등록된 EOA 가 한다.
+	//
+	// 이 단언이 예전에 `maker == signer` 였고, 그것이 2026-08-11 무장 실패가
+	// 시험을 통과한 채로 지나온 이유다. 거래소는 401 로 답했다:
+	// "Authenticated signer does not match the order signer".
 	if !strings.EqualFold(o["maker"].(string), fixtureAccount) {
-		t.Errorf("maker 가 PREDICT_ACCOUNT 가 아니다: %v", o["maker"])
+		t.Errorf("maker 가 PREDICT_ACCOUNT 가 아니다: %v — 자금은 스마트계정에 있다", o["maker"])
+	}
+	if strings.EqualFold(o["signer"].(string), fixtureAccount) {
+		t.Errorf("signer 가 스마트계정이다(%v) — 인증 세션은 EOA 로 맺어지므로 401 이 된다", o["signer"])
+	}
+	if !strings.EqualFold(o["signer"].(string), fixtureSignerEOA) {
+		t.Errorf("signer(%v) 가 키에서 유도된 EOA(%v) 가 아니다", o["signer"], fixtureSignerEOA)
 	}
 	if o["side"] != uint8(0) {
 		t.Errorf("side = %v, 기대 0(BUY) — 이 봇은 매도 주문을 내지 않는다", o["side"])
