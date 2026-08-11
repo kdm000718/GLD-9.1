@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/big"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -384,7 +385,10 @@ func (s *orderSender) Create(ctx context.Context, r exec.Request) (exec.CreateRe
 		// ── 여기가 이 봇의 유일한 무장 게이트다 ──
 		id := "dryrun-" + strconv.FormatInt(s.dryRunSeq.Add(1), 10)
 		s.logf("DRY-RUN — 전송하지 않는다 (가상 id=%s)", id)
-		return exec.CreateResult{ID: id, LockedUntil: s.now()}, nil
+		// **가상 해시도 준다.** 이것이 없으면 DRY-RUN 이 체결 확인 경로를
+		// 통째로 건너뛰고, 24시간을 돌려도 그 경로에 대해 아무것도 증명하지
+		// 못한다 — 이 봇의 실거래 결함 아홉 중 다섯이 그렇게 숨어 있었다.
+		return exec.CreateResult{ID: id, Hash: dryRunHashPrefix + id, LockedUntil: s.now()}, nil
 	}
 
 	res, err := s.Rest.CreateOrder(ctx, body)
@@ -393,9 +397,32 @@ func (s *orderSender) Create(ctx context.Context, r exec.Request) (exec.CreateRe
 	}
 	return exec.CreateResult{
 		ID:                 res.OrderID,
+		Hash:               res.OrderHash,
 		LockedUntil:        res.RemovalLockedUntil,
 		RemovalLockUnknown: res.RemovalLockUnknown,
 	}, nil
+}
+
+// dryRunHashPrefix 는 가상 주문의 해시 앞머리다. [orderSender.Filled] 가
+// 이것으로 "전송된 적 없는 주문" 을 가려낸다 — 거래소에 없는 해시를 물어보면
+// 404 가 오고, DRY-RUN 이 매 회차 조회 실패 로그로 뒤덮인다.
+const dryRunHashPrefix = "dryrun-hash-"
+
+// Filled 는 이 주문이 몇 주 찼는지 거래소에 묻는다.
+//
+// DRY-RUN 에서는 언제나 0 이다 — 전송하지 않았으니 찰 수가 없다. 그래도 이
+// 경로를 타는 것이 요점이다: exec 는 무장 여부와 무관하게 같은 코드를 돌고,
+// 확인 대기 주문이 풀리는지가 DRY-RUN 에서도 관찰된다.
+func (s *orderSender) Filled(ctx context.Context, hash string) (float64, error) {
+	if strings.HasPrefix(hash, dryRunHashPrefix) {
+		return 0, nil
+	}
+	if !s.Armed {
+		// 무장하지 않았는데 진짜 해시가 왔다 — 배선이 어긋난 것이다.
+		// 0 을 돌려주면 "안 찼다"가 되어 그 어긋남이 조용히 묻힌다.
+		return 0, fmt.Errorf("DRY-RUN 인데 실제 주문 해시를 확인하려 한다 (%q)", hash)
+	}
+	return s.Rest.OrderFilled(ctx, hash)
 }
 
 // Remove 는 주문 취소다. DRY-RUN 에서는 우리가 만든 가상 주문을 우리가

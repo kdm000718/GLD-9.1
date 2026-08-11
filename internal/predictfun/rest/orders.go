@@ -397,6 +397,68 @@ func flatten(in []flexString) []string {
 	return out
 }
 
+// ------------------------------------------------------------- 주문 단건 조회
+
+// orderFilledResponse 는 `GET /v1/orders/{hash}` 의 응답 중 우리가 쓰는 둘이다.
+//
+// 실측(2026-08-12), 잘라내지 않은 원문:
+//
+//	{"data":{"amount":"2000000000000000000",
+//	         "amountFilled":"2000000000000000000",
+//	         "currency":"USDT","id":"2025535067","status":"FILLED",
+//	         "order":{...}},"success":true}
+//
+// `amount` 는 **주식 수**를 18 decimals wei 로 적은 값이다(서명한 주문의
+// takerAmount 와 같다). 담보 금액이 아니다 — 같은 응답의
+// `order.makerAmount` 가 1.32e18 이었고 1.32/2.00 = 0.66 이 그 주문의 가격이다.
+type orderFilledResponse struct {
+	envelopeMeta
+	Data struct {
+		Amount       json.Number `json:"amount"`
+		AmountFilled json.Number `json:"amountFilled"`
+		Status       string      `json:"status"`
+	} `json:"data"`
+}
+
+// OrderFilled 는 이 주문이 지금까지 **몇 주 찼는지** 돌려준다.
+//
+// # 왜 필요한가
+//
+// 취소 응답의 `removed`/`noop` 은 "그 주문이 호가창에 없다"는 뜻일 뿐이고,
+// **체결된 주문도 호가창에 없다.** 그 둘을 구분하지 못해 2026-08-11 실거래에서
+// 회차 명목이 상한의 1.9배까지 갔다(`internal/exec.Orders.Filled` 주석에 로그
+// 발췌가 있다). 체결 피드는 2.6~4.6초 늦게 오므로 그때까지 기다릴 수 없다.
+//
+// # 경로가 받는 것은 해시다
+//
+// 숫자 orderId 로 이 경로를 부르면 404 `order not found` 다(실측). 반드시
+// 생성 응답의 `orderHash` 를 넘겨라.
+//
+// # 못 읽으면 에러다 — 0 이 아니다
+//
+// `amountFilled` 가 없거나 숫자가 아니면 에러를 돌려준다. 0 으로 떨어뜨리면
+// "이 주문은 안 찼다"가 되고, 그것이 정확히 이 함수가 막으려는 거짓말이다.
+func (c *Client) OrderFilled(ctx context.Context, hash string) (shares float64, err error) {
+	if hash == "" {
+		return 0, errors.New("주문 해시가 비어 있다")
+	}
+	var resp orderFilledResponse
+	if err := c.GetAuth(ctx, "/v1/orders/"+url.PathEscape(hash), nil, &resp); err != nil {
+		return 0, fmt.Errorf("주문 조회: %w", err)
+	}
+	if err := resp.verdict(); err != nil {
+		return 0, fmt.Errorf("주문 조회: %w", err)
+	}
+	filledWei, err := requiredNumber(resp.Data.AmountFilled, "amountFilled")
+	if err != nil {
+		return 0, fmt.Errorf("주문 조회: %w", err)
+	}
+	if filledWei < 0 {
+		return 0, fmt.Errorf("주문 조회: amountFilled 가 음수다 (%v)", filledWei)
+	}
+	return filledWei / weiPerUnit, nil
+}
+
 // -------------------------------------------------------------------- 포지션
 
 // Position 은 GET /v1/positions 의 PositionData 한 건이다.

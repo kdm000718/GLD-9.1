@@ -65,6 +65,12 @@ type fakeOrders struct {
 	removeSteps []int
 	createFn    func(n int, r Request) (CreateResult, error)
 	removeFn    func(n int, ids []string) (RemoveResult, error)
+	// filledFn 은 단건 조회의 답이다. nil 이면 "한 주도 안 찼다" — 대부분의
+	// 시험이 체결 없이 재호가만 본다.
+	filledFn func(hash string) (float64, error)
+	// filledAsks 는 단건 조회가 불린 해시들이다. **누가 물어봤는지**를 봐야
+	// 확인 경로가 배선에 실제로 걸려 있는지 알 수 있다.
+	filledAsks []string
 	// book 은 지금 거래소 호가창에 살아 있는 우리 주문이다(ID → 주문).
 	book map[string]Request
 }
@@ -84,7 +90,11 @@ func (f *fakeOrders) Create(_ context.Context, r Request) (CreateResult, error) 
 	fn := f.createFn
 	f.mu.Unlock()
 
-	res := CreateResult{ID: fmt.Sprintf("ord-%d", n)}
+	id := fmt.Sprintf("ord-%d", n)
+	// **해시를 반드시 채운다.** 이것이 없으면 취소가 확인된 주문의 체결
+	// 여부를 물어볼 수 없어 명목이 회차 끝까지 잠긴다 — 거래소는 언제나
+	// 해시를 준다(rest.CreateOrderResult.OrderHash).
+	res := CreateResult{ID: id, Hash: "hash-" + id}
 	var err error
 	if fn != nil {
 		res, err = fn(n, r)
@@ -128,6 +138,31 @@ func (f *fakeOrders) Remove(_ context.Context, ids []string) (RemoveResult, erro
 		f.mu.Unlock()
 	}
 	return res, err
+}
+
+// Filled 는 그 주문이 몇 주 찼는지다. 기본은 0 — 시험이 따로 말하지 않으면
+// 아무것도 차지 않았다.
+func (f *fakeOrders) Filled(_ context.Context, hash string) (float64, error) {
+	f.mu.Lock()
+	f.filledAsks = append(f.filledAsks, hash)
+	fn := f.filledFn
+	f.mu.Unlock()
+	if fn == nil {
+		return 0, nil
+	}
+	return fn(hash)
+}
+
+// askedFor 는 이 해시에 단건 조회가 갔는지다.
+func (f *fakeOrders) askedFor(hash string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, h := range f.filledAsks {
+		if h == hash {
+			return true
+		}
+	}
+	return false
 }
 
 // bookLevels 는 지금 거래소 호가창에 있는 우리 물량이다(틱 → 주식 수).
@@ -320,12 +355,25 @@ func (h *harness) refreshBook() {
 	for p, q := range h.crowdBids {
 		bids[p] += q
 	}
+	asks := map[float64]float64{}
+	for p, q := range h.crowdAsks {
+		asks[p] += q
+	}
 	factor := math.Pow(10, float64(h.round.Precision))
+	full := order.Full(h.round.Precision)
 	for tick, sh := range h.orders.bookLevels() {
+		// **우리 주문이 책의 어느 쪽에 서는가는 방향이 정한다.** 책은 Up
+		// 기준 한 벌이므로 Down 매수 t 는 `1.00 − t` 자리의 매도호가로
+		// 나타난다(book.go). 하네스가 이것을 흉내내지 않으면 Down 회차의
+		// 제외 시험이 통째로 헛돈다 — 우리 물량이 애초에 그쪽에 없으니까.
+		if h.frozen.Direction == ledger.OutcomeDown {
+			asks[float64(full-tick)/factor] += sh
+			continue
+		}
 		bids[float64(tick)/factor] += sh
 	}
 	raw := fmt.Sprintf(`{"bids":[%s],"asks":[%s],"updateTimestampMs":`,
-		levelsJSON(bids), levelsJSON(h.crowdAsks))
+		levelsJSON(bids), levelsJSON(asks))
 	if raw == h.lastRaw {
 		return
 	}
@@ -631,11 +679,15 @@ func TestUnknownCreateIsNeverRetried(t *testing.T) {
 // 결과는 불명이지만 식별자는 받은 경우 — 재전송하지 않고 **취소**를 시도한다.
 func TestUnknownCreateWithIDIsCancelledNotResent(t *testing.T) {
 	h := newHarness(t)
+	// 해시를 함께 준다 — 응답은 파싱됐는데 분류가 "불명" 인 경우다. 해시가
+	// 있어야 취소 확인 뒤 **얼마나 찼는지 물어볼 수 있고**, 그래야 명목이
+	// 풀린다. 해시가 없는 경우는 TestNoHashKeepsTheNotionalReserved 가 본다.
 	h.orders.createFn = func(n int, _ Request) (CreateResult, error) {
+		id := fmt.Sprintf("ord-%d", n)
 		if n == 0 {
-			return CreateResult{ID: "ord-0"}, &fakeOrderError{safe: false, msg: "결과 불명"}
+			return CreateResult{ID: id, Hash: "hash-" + id}, &fakeOrderError{safe: false, msg: "결과 불명"}
 		}
-		return CreateResult{ID: fmt.Sprintf("ord-%d", n)}, nil
+		return CreateResult{ID: id, Hash: "hash-" + id}, nil
 	}
 	if err := h.run(); err != nil {
 		t.Fatalf("RunRound: %v", err)

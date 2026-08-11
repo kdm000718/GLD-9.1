@@ -100,6 +100,12 @@ func (r Request) Notional() float64 { return r.Shares * r.Tick.Float() }
 type CreateResult struct {
 	// ID 는 취소에 쓸 식별자다. 비어 있으면 우리는 이 주문을 취소할 수 없다.
 	ID string
+	// Hash 는 이 주문을 **단건 조회**할 때 쓰는 키다(`GET /v1/orders/{hash}`).
+	// ID 와 다르다 — 숫자 ID 로 그 경로를 부르면 404 다(2026-08-12 실측).
+	//
+	// 이것이 필요한 이유는 [Orders.Filled] 다. 취소가 확인됐다는 말만으로는
+	// 그 주문이 안 찼다고 말할 수 없고, 해시가 없으면 물어볼 수도 없다.
+	Hash string
 	// LockedUntil 은 이 시각 전에는 취소가 거부되는 잠금 창의 끝이다.
 	LockedUntil time.Time
 	// RemovalLockUnknown 은 잠금 시각을 못 읽었다는 뜻이다. "잠금 없음"과
@@ -126,6 +132,28 @@ type RemoveResult struct {
 type Orders interface {
 	Create(ctx context.Context, r Request) (CreateResult, error)
 	Remove(ctx context.Context, ids []string) (RemoveResult, error)
+	// Filled 는 **이 주문이 지금까지 몇 주 찼는지**를 거래소에 직접 묻는다.
+	//
+	// # 왜 이 메서드가 있어야 하는가
+	//
+	// 취소 응답의 `removed`/`noop` 은 "그 주문이 더는 호가창에 없다"는 뜻일
+	// 뿐이다. **체결된 주문도 호가창에 없다.** 2026-08-11 실거래에서 정확히
+	// 그 일이 났다:
+	//
+	//	17:36:07.554  취소 확인 (id=2024751893) — 명목 3.92 를 노출에서 뺀다
+	//	17:36:07.892  신규 49 → 8주 @ 0.49 (잔여 4.2392)   ← 노출 0 이라 믿고
+	//	17:36:09.702  체결 8주 @ 0.49                       ← 그 "취소된" 주문이
+	//
+	// 체결 피드는 2.6~4.6초 늦게 온다(실측). 그 사이 봇은 자기가 아무것도
+	// 들고 있지 않다고 믿고 같은 크기를 다시 걸었다. 회차 명목이 상한
+	// 4.4 대비 7.84 까지 갔다.
+	//
+	// 그래서 취소가 확인된 주문은 **버리지 않고 여기에 물어본다.** 답을
+	// 들으면 찬 만큼만 노출에 남기고 나머지를 푼다.
+	//
+	// 에러를 돌려주면 "모른다"는 뜻이고, 호출자는 그 주문의 명목을 계속
+	// 노출에 남긴다 — 모르는 것을 안 찼다고 치는 쪽이 이 사고를 만들었다.
+	Filled(ctx context.Context, hash string) (shares float64, err error)
 }
 
 // Fills 는 이 회차의 체결을 알려주는 유일한 창구다.
@@ -170,6 +198,22 @@ const (
 	// DefaultFinalCancelTimeout 은 회차 종료 후 미체결 취소에 쓰는 상한이다.
 	// 이 안에 확인하지 못하면 에러다 — 잊힌 주문은 체결된다.
 	DefaultFinalCancelTimeout = 30 * time.Second
+
+	// DefaultSettleGrace 는 취소가 확인된 주문의 체결 여부를 **거래소에 묻지
+	// 못했을 때**, 체결 피드가 따라잡았다고 볼 때까지 기다리는 시간이다.
+	//
+	// 값의 근거는 실측이다. 2026-08-11 실거래의 원장(거래소가 적은 체결 시각)과
+	// 로그(우리가 그것을 본 시각)를 대조하면 지연이 이랬다:
+	//
+	//	17:21:51 → 17:21:53.658   2.6초
+	//	17:21:53 → 17:21:55.677   2.6초
+	//	17:21:51 → 17:21:55.677   4.6초
+	//	17:25:01 → 17:25:04.373   3.3초
+	//	17:36:07 → 17:36:09.702   2.7초
+	//
+	// 체결 조회 최소 간격 2초가 그 안에 들어 있다. 6초는 관측된 최댓값에
+	// 여유를 더한 값이고, **이쪽으로 틀리면 덜 거는 방향**이다.
+	DefaultSettleGrace = 6 * time.Second
 )
 
 // maxRemoveBatch 는 한 취소 요청에 담을 수 있는 ID 개수다. `rest.MaxRemoveIDs`
@@ -234,6 +278,8 @@ type Runner struct {
 	RejectBackoff time.Duration
 	// FinalCancelTimeout 은 0 이면 DefaultFinalCancelTimeout.
 	FinalCancelTimeout time.Duration
+	// SettleGrace 는 0 이면 DefaultSettleGrace.
+	SettleGrace time.Duration
 
 	// Clock 은 벽시계다. 테스트가 쥔다. nil 이면 time.Now.
 	//
@@ -314,16 +360,32 @@ func (r *Runner) finalCancelTimeout() time.Duration {
 	return DefaultFinalCancelTimeout
 }
 
+func (r *Runner) settleGrace() time.Duration {
+	if r.SettleGrace > 0 {
+		return r.SettleGrace
+	}
+	return DefaultSettleGrace
+}
+
 // ---------------------------------------------------------------------------
 // 회차 상태 — 전부 RunRound 안에 산다
 // ---------------------------------------------------------------------------
 
 // openOrder 는 우리가 낸 주문 하나다.
 type openOrder struct {
-	id       string
+	id string
+	// hash 는 단건 조회 키다([Orders.Filled]). 비어 있으면 이 주문이 얼마나
+	// 찼는지 물어볼 수 없고, 그러면 명목을 회차 끝까지 노출에 남긴다.
+	hash     string
 	tick     int64
 	shares   float64
 	notional float64
+	// goneAt 은 거래소가 이 주문이 호가창에 없다고 확인해 준 시각이다.
+	// 체결 피드가 따라잡았는지 재는 기준점이다.
+	goneAt time.Time
+	// askAt 은 다음 단건 조회를 허용하는 시각이다. 조회가 실패했을 때 매
+	// 바퀴(50ms) 다시 물으면 240 req/min 예산이 순식간에 사라진다.
+	askAt time.Time
 	// placed 는 [Runner.Clock] 이 준 시각이다. 쿨다운을 여기서 잰다.
 	placed time.Time
 	// retryAt 은 다음 취소 시도를 허용하는 시각이다. 잠금 창을 아는 동안에는
@@ -360,6 +422,15 @@ type roundState struct {
 	// pending 은 취소를 요청했지만 거래소가 사라졌다고 확인해 주지 **않은**
 	// 주문이다. 명목은 여전히 노출에 있다.
 	pending []*openOrder
+	// confirming 은 거래소가 "호가창에 없다"고 확인해 준 주문이다. 그런데
+	// **체결된 주문도 호가창에 없다** — 그러니 아직 이 주문이 돈을 썼는지
+	// 안 썼는지 모른다. [Orders.Filled] 가 답할 때까지, 또는 체결 피드가
+	// 따라잡을 때까지 명목을 노출에 남긴다([roundState.exposure] 참고).
+	confirming []*openOrder
+	// confirmedFilled* 는 단건 조회로 **확정된** 체결이다. 체결 피드보다
+	// 앞서 도착한다(피드는 2.6~4.6초 늦다).
+	confirmedFilledNotional float64
+	confirmedFilledShares   float64
 	// unknownNotional 은 생성 결과를 모르고 식별자도 없어서 취소조차 할 수
 	// 없는 주문의 명목이다. 회차가 끝날 때까지 노출에 남는다 — 그 주문이
 	// 존재한다면 체결될 수 있고, 우리는 그것을 막을 수단이 없다.
@@ -384,9 +455,29 @@ type roundState struct {
 	lastActionAt time.Time
 }
 
+// exposure 는 지금 이 회차가 쓴 것으로 **간주해야 하는** 돈이다.
+//
+// # 체결분이 max 인 이유
+//
+// 같은 체결을 두 경로로 알게 된다:
+//
+//	체결 피드   느리다(실측 2.6~4.6초). 하지만 결국 전부 온다.
+//	단건 조회   빠르다(~30ms). 하지만 취소를 확인한 주문에 대해서만 묻는다.
+//
+// 둘을 더하면 같은 돈을 두 번 세고, 어느 하나만 쓰면 상대가 아는 것을 놓친다.
+// 그래서 **max** 다 — 피드가 따라잡으면 두 값이 같아지고, 그때도 max 는
+// 그대로다.
+//
+// 그리고 아직 답을 못 들은 주문(confirming)은 **전액 찼다고 친다.** 모르는
+// 것을 안 찼다고 치는 쪽이 2026-08-11 의 노출 2배를 만들었다. 이쪽으로 틀리면
+// 덜 걸 뿐이다.
 func (st *roundState) exposure() risk.Exposure {
+	worst := st.confirmedFilledNotional
+	for _, o := range st.confirming {
+		worst += o.notional
+	}
 	x := risk.Exposure{
-		FilledNotional: st.filledNotional,
+		FilledNotional: math.Max(st.filledNotional, worst),
 		PendingCancel:  st.unknownNotional,
 	}
 	if st.live != nil {
@@ -396,6 +487,17 @@ func (st *roundState) exposure() risk.Exposure {
 		x.PendingCancel += o.notional
 	}
 	return x
+}
+
+// filledSharesKnown 은 지금까지 찬 것으로 아는 주수다. 명목과 같은 이유로
+// max 다.
+//
+// **[openOrder.filledBefore] 의 기준점이 이 값이어야 한다.** 피드 값만 쓰면,
+// 단건 조회로 먼저 알게 된 체결이 나중에 피드로 또 도착할 때 그것이 *다음*
+// 주문의 몫으로 계산된다 — 한 주도 안 찬 주문이 전량 체결로 보이고, 아무도
+// 그것을 취소하지 않는다.
+func (st *roundState) filledSharesKnown() float64 {
+	return math.Max(st.filledShares, st.confirmedFilledShares)
 }
 
 // fillEpsilon 은 주수 비교의 여유다. 거래소는 wei 정수를, 우리는 float 을
@@ -435,7 +537,7 @@ func (st *roundState) retireFullyFilled() {
 	if st.live.shares <= 0 {
 		return
 	}
-	if st.filledShares-st.live.filledBefore+fillEpsilon >= st.live.shares {
+	if st.filledSharesKnown()-st.live.filledBefore+fillEpsilon >= st.live.shares {
 		st.live = nil
 	}
 }
@@ -449,6 +551,13 @@ func (st *roundState) hasID(id string) bool {
 		return true
 	}
 	for _, o := range st.pending {
+		if o.id == id {
+			return true
+		}
+	}
+	// confirming 도 본다. 같은 식별자를 든 주문이 둘이면 단건 조회의 답을
+	// 어느 쪽에 붙일지 알 수 없다.
+	for _, o := range st.confirming {
 		if o.id == id {
 			return true
 		}
@@ -528,9 +637,16 @@ func (r *Runner) RunRound(ctx context.Context, rd live.Round, f live.Frozen, e r
 	if err != nil {
 		return err
 	}
+	// 이 회차에 오더북을 어느 쪽으로 읽을지 여기서 한 번 정한다. 루프 안에서
+	// 매 바퀴 다시 정하면 방향이 바뀔 수 있는 자리가 생긴다 — 방향은 동결값이
+	// 정하는 것이고 회차 내내 하나여야 한다.
+	view, err := newBookView(f.Direction, rd.Precision)
+	if err != nil {
+		return err
+	}
 
 	st := &roundState{dwell: &quote.Dwell{Need: r.Dwell}}
-	loopErr := r.loop(ctx, rd, f, e, tokenID, st)
+	loopErr := r.loop(ctx, rd, f, e, tokenID, st, view)
 	// 회차가 어떻게 끝났든 — 정상 종료든, 무장 해제든, ctx 취소든 — 살아 있는
 	// 주문은 반드시 거둔다. ctx 가 이미 죽었어도 취소는 나가야 하므로
 	// WithoutCancel 로 새 시한을 판다.
@@ -598,7 +714,7 @@ func (r *Runner) observe(st *roundState) {
 	o := Observation{
 		Exposure:     st.exposure(),
 		Unaccounted:  st.unknownNotional,
-		FilledShares: st.filledShares,
+		FilledShares: st.filledSharesKnown(),
 		Reprices:     st.reprices,
 		LastActionAt: st.lastActionAt,
 		LastLoopAt:   r.now(),
@@ -683,11 +799,17 @@ func tokenFor(rd live.Round, direction string) (string, error) {
 	case ledger.OutcomeDown:
 		return rd.DownTokenID, nil
 	}
-	return "", fmt.Errorf("exec: 모르는 방향 %q (%q 또는 %q 여야 한다)", direction, ledger.OutcomeUp, ledger.OutcomeDown)
+	return "", tokenDirectionError(direction)
+}
+
+// tokenDirectionError 는 모르는 방향 문자열에 대한 하나뿐인 에러다. 방향을
+// 해석하는 자리가 둘(토큰 선택, 호가창 거울)이므로 문구를 한 곳에 둔다.
+func tokenDirectionError(direction string) error {
+	return fmt.Errorf("exec: 모르는 방향 %q (%q 또는 %q 여야 한다)", direction, ledger.OutcomeUp, ledger.OutcomeDown)
 }
 
 // loop 는 회차가 끝날 때까지 도는 본체다.
-func (r *Runner) loop(ctx context.Context, rd live.Round, f live.Frozen, e risk.Equity, tokenID string, st *roundState) error {
+func (r *Runner) loop(ctx context.Context, rd live.Round, f live.Frozen, e risk.Equity, tokenID string, st *roundState, view bookView) error {
 	staleNs := r.StaleAfter.Nanoseconds()
 	for {
 		now := r.now()
@@ -715,9 +837,11 @@ func (r *Runner) loop(ctx context.Context, rd live.Round, f live.Frozen, e risk.
 		// 요점이다.** 빠뜨리면 BestBid 가 우리 자신을 돌려주고, 목표가가
 		// 우리 호가와 같아져 "동일가 유지"로 영원히 굳는다 — 군중이 내려가도
 		// 따라 내려오지 못한다. quote 테스트로는 절대 잡히지 않는다.
-		ex, exOK := excludeOurs(st.ours())
-		bestBid, hasBid := r.Book.BestBid(ex)
-		bestAsk, hasAsk := r.Book.BestAsk(ex)
+		//
+		// **view 를 거치는 것이 두 번째 요점이다.** 오더북은 마켓당 한 벌이고
+		// Up 기준이다 — Down 회차에 그대로 읽으면 남의 책을 보고 가격을
+		// 정하게 되고, 실제로 관통해 테이커 수수료를 물었다(book.go 참고).
+		ex, exOK := excludeOurs(view.ourTicks(st.ours()))
 		// 우리 주문을 뺄 수 없으면 그 호가창은 우리 자신이 섞인 값이다.
 		// 오래된 호가창과 똑같이 다룬다 — 믿을 수 없는 책으로는 새로 걸지 않고
 		// 걸린 것은 거둔다.
@@ -728,11 +852,7 @@ func (r *Runner) loop(ctx context.Context, rd live.Round, f live.Frozen, e risk.
 		stale := r.Book.Stale(r.monoNs(), staleNs) || untrusted
 
 		// 3) 판단은 quote 가 한다. 여기서는 아무것도 비교하지 않는다.
-		qb := quote.Book{
-			BestBid: bestBid, HasBid: hasBid,
-			BestAsk: bestAsk, HasAsk: hasAsk,
-			Precision: rd.Precision,
-		}
+		qb := view.quoteBook(r.Book, ex)
 		qo := quote.Open{}
 		if st.live != nil {
 			qo = quote.Open{Tick: st.live.tick, Placed: st.live.placed, Live: true}
@@ -760,6 +880,11 @@ func (r *Runner) loop(ctx context.Context, rd live.Round, f live.Frozen, e risk.
 
 		// 4) 취소를 확인할 때까지 물고 늘어진다. 취소 재시도는 멱등이라 안전하다.
 		r.sweepPending(ctx, st, now)
+		// 4-1) 취소가 확인된 주문에 "얼마나 찼나"를 묻는다. **이것이 노출을
+		//      푸는 유일한 자리다.** 이 호출이 빠지면 confirming 이 계속 쌓여
+		//      회차가 한 번 걸고 멈춘다 — 예전처럼 두 배로 거는 것보다는
+		//      낫지만, 그것도 고장이다.
+		r.resolveConfirming(ctx, st, r.now())
 
 		// 5) 바깥에 우리 상태를 복사해 준다. 관측 전용이다 — 이 호출의 결과가
 		//    회차 진행에 영향을 주는 경로는 없다.
@@ -817,7 +942,7 @@ func (r *Runner) transmit(ctx context.Context, st *roundState, req Request, now 
 		}
 		// **보냈을 수 있다.** 다시 보내면 둘 들어간다.
 		o := &openOrder{
-			id: res.ID, tick: req.Tick.V, shares: req.Shares,
+			id: res.ID, hash: res.Hash, tick: req.Tick.V, shares: req.Shares,
 			notional: req.Notional(), placed: now,
 			retryAt: retryAtFrom(res, now), lockUnknown: res.RemovalLockUnknown,
 		}
@@ -833,10 +958,10 @@ func (r *Runner) transmit(ctx context.Context, st *roundState, req Request, now 
 	}
 
 	st.live = &openOrder{
-		id: res.ID, tick: req.Tick.V, shares: req.Shares,
+		id: res.ID, hash: res.Hash, tick: req.Tick.V, shares: req.Shares,
 		notional: req.Notional(), placed: now,
 		retryAt: retryAtFrom(res, now), lockUnknown: res.RemovalLockUnknown,
-		filledBefore: st.filledShares,
+		filledBefore: st.filledSharesKnown(),
 	}
 	return nil
 }
@@ -916,9 +1041,16 @@ func (r *Runner) sweepPending(ctx context.Context, st *roundState, now time.Time
 		return
 	}
 
-	// **사라졌다고 확인된 것만 노출에서 뺀다.** 부분체결분은 Fills 가 따로
-	// 세므로 여기서 빼도 이중 계산이 아니다(살아 있는 동안 명목 전액을 세고
-	// 있었으니 잠시 보수적으로 겹칠 뿐이다).
+	// **"사라졌다"는 "안 찼다"가 아니다.**
+	//
+	// 예전 이 자리의 주석은 "부분체결분은 Fills 가 따로 세므로 여기서 빼도
+	// 이중 계산이 아니다" 라고 적혀 있었다. 그 문장은 체결 피드가 **이미**
+	// 그 체결을 셌다고 가정하는데, 피드는 2.6~4.6초 늦게 온다(실측).
+	//
+	// 그 가정이 2026-08-11 에 회차 명목을 상한의 1.9배로 만들었다. 그러니
+	// 사라진 주문은 노출에서 빼는 것이 아니라 **확인 대기로 옮긴다** —
+	// 명목은 그대로 두고, [Runner.resolveConfirming] 이 거래소에 얼마나
+	// 찼는지 물어본 뒤에 푼다.
 	gone := map[string]bool{}
 	for _, id := range res.Removed {
 		gone[id] = true
@@ -938,7 +1070,10 @@ func (r *Runner) sweepPending(ctx context.Context, st *roundState, now time.Time
 	for _, o := range st.pending {
 		switch {
 		case gone[o.id]:
-			r.logf("취소 확인 (id=%s) — 명목 %.4f 를 노출에서 뺀다", o.id, o.notional)
+			o.goneAt = now
+			o.askAt = now // 곧바로 물어본다
+			st.confirming = append(st.confirming, o)
+			r.logf("취소 확인 (id=%s) — 명목 %.4f 는 체결 여부를 확인할 때까지 노출에 남긴다", o.id, o.notional)
 			continue
 		case stillThere[o.id]:
 			o.retryAt = now.Add(r.rejectBackoff())
@@ -951,6 +1086,75 @@ func (r *Runner) sweepPending(ctx context.Context, st *roundState, now time.Time
 		st.pending[i] = nil
 	}
 	st.pending = kept
+}
+
+// resolveConfirming 은 취소가 확인된 주문에 **얼마나 찼는지**를 물어 노출을
+// 푼다. 노출에서 명목이 빠지는 자리는 이 함수 하나뿐이다.
+//
+// # 두 가지 방법으로만 풀린다
+//
+//	거래소가 답했다        찬 만큼만 남기고 나머지를 푼다 (~30ms, 정상 경로)
+//	체결 피드가 따라잡았다  피드 값이 진실이 됐으므로 그대로 푼다 (느린 경로)
+//
+// 두 번째가 필요한 이유: 해시가 없거나 조회가 계속 실패할 수 있다. 그때
+// 영영 잠가 두면 회차 하나가 통째로 멈춘다. [Runner.SettleGrace] 만큼
+// 기다리면 피드가 그 체결을 이미 실어 왔다고 볼 수 있다 — 실측 지연이
+// 2.6~4.6초이므로 기본값은 그보다 넉넉하다.
+//
+// **에러는 삼킨다.** 조회 실패는 "모른다"이고, 모르는 동안 명목은 노출에
+// 남아 있다 — 이미 안전한 쪽이다. 여기서 회차를 죽이면 살아 있는 주문을
+// 든 채 멈추는 경로가 하나 더 생긴다.
+func (r *Runner) resolveConfirming(ctx context.Context, st *roundState, now time.Time) {
+	if len(st.confirming) == 0 {
+		return
+	}
+	grace := r.settleGrace()
+	kept := st.confirming[:0]
+	for _, o := range st.confirming {
+		if o.hash != "" && !now.Before(o.askAt) {
+			shares, err := r.Orders.Filled(ctx, o.hash)
+			switch {
+			case err != nil:
+				o.askAt = now.Add(r.rejectBackoff())
+				r.logf("주문 %s 의 체결량을 확인하지 못했다 — 명목 %.4f 를 노출에 남긴다: %v", o.id, o.notional, err)
+			case shares < 0 || math.IsNaN(shares) || math.IsInf(shares, 0):
+				// 값이 말이 안 되면 답을 못 들은 것과 같이 다룬다. 음수
+				// 체결량을 그대로 더하면 노출이 **줄어든다** — 사고의 방향이다.
+				o.askAt = now.Add(r.rejectBackoff())
+				r.logf("주문 %s 의 체결량이 %v 다 — 값을 믿지 않고 명목 %.4f 를 노출에 남긴다", o.id, shares, o.notional)
+			default:
+				// 찬 만큼만 남긴다. 주문 수량을 넘는 답은 그대로 쓰지 않는다
+				// (거래소가 다른 단위를 주면 노출이 터무니없이 커진다).
+				filled := math.Min(shares, o.shares)
+				st.confirmedFilledShares += filled
+				if o.shares > 0 {
+					st.confirmedFilledNotional += o.notional * (filled / o.shares)
+				}
+				r.logf("주문 %s 확인 — %.4f/%.4f주 체결(명목 %.4f 중 %.4f 를 쓴 것으로 센다)",
+					o.id, filled, o.shares, o.notional, o.notional*safeFrac(filled, o.shares))
+				continue
+			}
+		}
+		if !o.goneAt.IsZero() && now.Sub(o.goneAt) >= grace {
+			// 피드가 따라잡을 시간이 지났다. 이 주문의 체결은 이미
+			// filledNotional 에 들어 있다고 본다.
+			r.logf("주문 %s: %s 이 지나 체결 피드에 맡긴다 (명목 %.4f)", o.id, grace, o.notional)
+			continue
+		}
+		kept = append(kept, o)
+	}
+	for i := len(kept); i < len(st.confirming); i++ {
+		st.confirming[i] = nil
+	}
+	st.confirming = kept
+}
+
+// safeFrac 는 로그 문구용 비율이다. 0 으로 나누지 않는다.
+func safeFrac(a, b float64) float64 {
+	if b == 0 {
+		return 0
+	}
+	return a / b
 }
 
 // backoff 는 이번에 시도한 ID 들만 뒤로 민다.
@@ -975,7 +1179,7 @@ func (r *Runner) cancelEverything(ctx context.Context, st *roundState) error {
 	if st.live != nil {
 		r.beginCancel(st, r.now(), "회차 종료 — 미체결 전량 취소")
 	}
-	if len(st.pending) == 0 {
+	if len(st.pending) == 0 && len(st.confirming) == 0 {
 		return r.leftovers(st)
 	}
 
@@ -986,7 +1190,10 @@ func (r *Runner) cancelEverything(ctx context.Context, st *roundState) error {
 	for {
 		now := r.now()
 		r.sweepPending(cctx, st, now)
-		if len(st.pending) == 0 {
+		// 회차가 끝나도 **얼마나 찼는지는 알아야 한다.** 그 값이 마지막
+		// 관측으로 나가고, 감시는 그것으로 이 회차의 배당을 계산한다.
+		r.resolveConfirming(cctx, st, r.now())
+		if len(st.pending) == 0 && len(st.confirming) == 0 {
 			break
 		}
 		if !now.Before(deadline) {

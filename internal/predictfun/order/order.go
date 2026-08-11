@@ -50,6 +50,26 @@ func Ceiling(precision int) Tick {
 	return Tick{V: pow10(precision)/2 - 1, Precision: precision}
 }
 
+// Full 은 가격 1.00 에 해당하는 틱 수다 — 정밀도 2 면 100, 3 이면 1000.
+//
+// 이 값이 필요한 이유는 **CTF 이진 시장에서 두 결과의 가격 합이 정확히 1** 이기
+// 때문이다. predict.fun 의 오더북은 마켓당 한 벌이고 Up 기준으로 표현된다
+// (2026-08-12 실측: `predictTrades` 의 outcomeIndex 1 과 2 의 가격 합이 정확히
+// 1.00 이고, 책의 매수측이 outcomeIndex 1 이다). 그래서 Down 을 살 때의 호가는
+// Up 호가를 이 값에서 빼서 얻는다:
+//
+//	Down 최우선 매수호가 = Full − Up 최우선 매도호가
+//	Down 최우선 매도호가 = Full − Up 최우선 매수호가
+//
+// precision 가드는 Ceiling 과 같다 — 범위 밖이면 거울이 음수 틱을 만들어 관통
+// 방지가 조용히 무너진다.
+func Full(precision int) int64 {
+	if precision < 1 || precision > weiDecimals {
+		panic(fmt.Sprintf("order: Full 의 precision 은 1..%d 이어야 한다 (받은 값 %d)", weiDecimals, precision))
+	}
+	return pow10(precision)
+}
+
 // weiPerShareExponent 는 18 decimals wei 로 스케일하는 데 필요한 지수다.
 // USDT 는 BSC 상에서 18 decimals 다 (이더리움의 6 이 아니다).
 const weiDecimals = 18
