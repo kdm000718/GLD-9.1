@@ -13,6 +13,7 @@ import (
 
 	"github.com/kdm000718/GLD-9.1/internal/features"
 	"github.com/kdm000718/GLD-9.1/internal/kernel"
+	"github.com/kdm000718/GLD-9.1/internal/ledger"
 	"github.com/kdm000718/GLD-9.1/internal/model"
 	"github.com/kdm000718/GLD-9.1/internal/onchain"
 	"github.com/kdm000718/GLD-9.1/internal/predictfun/auth"
@@ -191,7 +192,24 @@ func reconcile(ctx context.Context, rc *rest.Client, ledgerPath string) error {
 	// 마지막 자리가 갈릴 수 있다. 절대값 하한도 함께 둔다 — 원장이 비었을 때
 	// 상대 오차만으로는 어떤 차이도 통과하지 못한다.
 	const relTol, absTol = 1e-6, 1e-9
-	if held > st.FillShares+absTol+relTol*math.Abs(st.FillShares) {
+
+	// **메이커 리베이트만큼은 더 들고 있는 것이 정상이다.**
+	//
+	// 리베이트는 USDT 가 아니라 반대편 주식으로 들어온다(스펙 §4). 그런데
+	// 원장에는 그 지급을 적는 호출부가 아직 없다(exec 패키지 문서). 그래서
+	// 실체결이 하나라도 나면 거래소 포지션이 원장보다 정확히 리베이트만큼
+	// 많아지고, 이 검사가 기동을 거부한다.
+	//
+	// 2026-08-11 실거래에서 첫 체결 뒤 그대로 일어났다: 9.043235주 대
+	// 9.000000주, 차이 0.043235 ≈ 9 × 0.5%. 봇은 15번 재시작하며 매번 같은
+	// 이유로 죽었다 — **첫 체결이 곧 영구 기동 불가**였다. DRY-RUN 에서는
+	// 체결이 없어 드러날 수 없는 교착이다.
+	//
+	// 그래서 리베이트율만큼을 허용한다. 검사의 목적(봇 밖에서 거래했는가)은
+	// 그대로 남는다 — 0.5% 를 넘는 초과분은 여전히 걸린다. 리베이트를 원장에
+	// 적는 경로가 생기면 이 여유는 없애야 한다.
+	rebateTol := ledger.RebateShareRate * math.Abs(st.FillShares)
+	if held > st.FillShares+rebateTol+absTol+relTol*math.Abs(st.FillShares) {
 		return fmt.Errorf("%w: 거래소 포지션 %.6f주 > 원장 매수 누적 %.6f주 — "+
 			"체결이 원장에 안 적혔거나 이 계정으로 봇 밖에서 거래한 것이다. 사람이 확인해야 한다",
 			ErrReconcileMismatch, held, st.FillShares)

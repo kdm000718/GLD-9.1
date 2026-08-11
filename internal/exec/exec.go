@@ -959,10 +959,17 @@ func (r *Runner) leftovers(st *roundState) error {
 	for _, o := range st.pending {
 		ids = append(ids, o.id)
 	}
+	// **disarmError 로 감싼다.** 이 문구는 "무장을 풀고 사람이 확인해야 한다"
+	// 라고 말하는데, 2026-08-11 실거래에서 봇은 그 말을 하고도 다음 회차로
+	// 넘어가 주문을 계속 냈다. 배선이 회차 에러를 전부 똑같이 다뤘기 때문이다
+	// (로그만 찍고 계속). 말과 행동이 갈리면 말이 아니라 행동이 진짜다.
+	//
+	// 여기서 남은 주문은 "거래소에 살아 있을 수 있는데 우리가 모르는" 주문이다.
+	// 그 상태로 다음 회차를 시작하면 노출이 두 회차에 걸쳐 겹친다.
 	if st.unknownNotional > 0 {
-		return fmt.Errorf("exec: 회차가 끝났는데 우리 주문이 남아 있다 (취소 미확인 %v, 식별자 없는 명목 %.4f) — 무장을 풀고 사람이 확인해야 한다", ids, st.unknownNotional)
+		return &disarmError{err: fmt.Errorf("회차가 끝났는데 우리 주문이 남아 있다 (취소 미확인 %v, 식별자 없는 명목 %.4f) — 사람이 확인해야 한다", ids, st.unknownNotional)}
 	}
-	return fmt.Errorf("exec: 회차가 끝났는데 취소를 확인하지 못한 주문이 있다 (%v) — 무장을 풀고 사람이 확인해야 한다", ids)
+	return &disarmError{err: fmt.Errorf("회차가 끝났는데 취소를 확인하지 못한 주문이 있다 (%v) — 사람이 확인해야 한다", ids)}
 }
 
 // ---------------------------------------------------------------------------
@@ -980,6 +987,15 @@ func isDisarm(err error) bool {
 	var d *disarmError
 	return errors.As(err, &d)
 }
+
+// IsDisarm 은 이 에러가 **거래를 멈춰야 하는** 종류인지다. 배선이 회차 에러를
+// 가려낼 유일한 수단이다.
+//
+// 일시적 실패(조회 실패, 한 회차의 설정 오류)와 구분해야 한다 — 앞은 다음
+// 회차를 그냥 잡으면 되고, 뒤는 사람이 볼 때까지 새 회차를 잡으면 안 된다.
+// 이 구분이 배선에 없어서 2026-08-11 실거래에서 "무장을 풀라"는 에러가 난
+// 직후에 봇이 다음 주문을 냈다.
+func IsDisarm(err error) bool { return isDisarm(err) }
 
 // absorbFills 는 새 체결을 원장에 적고 노출에 더한다.
 //

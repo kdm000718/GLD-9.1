@@ -395,3 +395,58 @@ func TestArmingMinimumDerivesFromRiskConstants(t *testing.T) {
 		t.Fatalf("유도된 최소 담보가 %s 다", want)
 	}
 }
+
+// **메이커 리베이트만큼 더 들고 있는 것은 정상이다.**
+//
+// 리베이트는 반대편 주식으로 들어오는데 원장에는 그것을 적는 호출부가 아직
+// 없다. 그래서 실체결이 하나라도 나면 거래소 포지션이 원장보다 정확히
+// 리베이트만큼 많아진다.
+//
+// 2026-08-11 실거래에서 첫 체결 뒤 그대로 일어났다: 9.043235 대 9.000000.
+// 봇은 15번 재시작하며 매번 같은 이유로 죽었다 — **첫 체결이 곧 영구 기동
+// 불가**였다. DRY-RUN 은 체결이 없어 이 교착을 드러낼 수 없다.
+func TestReconcileAllowsMakerRebateOverhang(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ledger.csv")
+	l, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.RecordFill(ledger.Fill{
+		At: time.Unix(1786461604, 0).UTC(), RoundStart: 1786461600, MarketID: 1302510,
+		Outcome: ledger.OutcomeUp, Shares: 9, PriceUSD: 0.49,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = l.Close()
+
+	// 실측값 그대로: 9.043235주 보유, 원장은 9주.
+	positions := `[{"amount":"9043235000000000000","averageBuyPriceUsd":"0.49","valueUsd":"4.4","pnlUsd":"0"}]`
+	rc := accountServer(t, "", positions, 0)
+	if err := reconcile(context.Background(), rc, path); err != nil {
+		t.Fatalf("리베이트분을 불일치로 봤다 — 첫 체결 뒤 봇이 영영 못 뜬다: %v", err)
+	}
+}
+
+// 여유는 리베이트율까지다. 그 위는 여전히 걸려야 한다 — 안 그러면 이 검사가
+// 재는 대상("봇 밖에서 거래했는가")이 사라진다.
+func TestReconcileStillCatchesOverhangBeyondRebate(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ledger.csv")
+	l, err := ledger.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.RecordFill(ledger.Fill{
+		At: time.Unix(1786461604, 0).UTC(), RoundStart: 1786461600, MarketID: 1302510,
+		Outcome: ledger.OutcomeUp, Shares: 9, PriceUSD: 0.49,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_ = l.Close()
+
+	// 9.5주 — 리베이트 상한(9.045)을 훌쩍 넘는다.
+	positions := `[{"amount":"9500000000000000000","averageBuyPriceUsd":"0.49","valueUsd":"4.6","pnlUsd":"0"}]`
+	rc := accountServer(t, "", positions, 0)
+	if err := reconcile(context.Background(), rc, path); !errors.Is(err, ErrReconcileMismatch) {
+		t.Fatalf("리베이트를 넘는 초과분을 통과시켰다: %v", err)
+	}
+}

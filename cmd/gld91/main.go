@@ -535,6 +535,8 @@ func loop(ctx context.Context, cfg *Config, rc *rest.Client, runner *exec.Runner
 
 	done := map[string]bool{}
 	rounds := 0
+	// halted 는 exec 이 "사람이 확인해야 한다"고 판정한 뒤의 상태다.
+	halted := false
 	tick := time.NewTicker(200 * time.Millisecond)
 	defer tick.Stop()
 
@@ -554,6 +556,12 @@ func loop(ctx context.Context, cfg *Config, rc *rest.Client, runner *exec.Runner
 			logf("모니터 지시로 종료 — 회차 %d건 운용", rounds)
 			return nil
 		}
+		// 거래 중단 상태면 새 회차를 잡지 않는다. **프로세스는 끝내지 않는다** —
+		// systemd 의 Restart=always 가 곧바로 되살리고, 되살아난 봇은 이 상태를
+		// 기억하지 못해 아무 일 없었다는 듯 거래를 재개한다.
+		if halted {
+			continue
+		}
 		t, ok := rt.pick(time.Now(), cfg.MaxJoinLate, done)
 		if !ok {
 			continue
@@ -568,9 +576,23 @@ func loop(ctx context.Context, cfg *Config, rc *rest.Client, runner *exec.Runner
 				logf("종료 — 회차 %d건 운용", rounds)
 				return nil
 			}
-			// 회차 하나가 실패해도 봇은 계속 돈다. exec 가 종료 시 미체결
-			// 전량 취소를 이미 보장했다(RunRound 는 그것을 못 하면 에러다).
+			// 회차 하나가 실패해도 봇은 계속 돈다 — **다만 실패의 종류를
+			// 가린다.** exec 가 종료 시 미체결 전량 취소를 보장하지만, 그
+			// 취소를 **확인하지 못한 채** 끝난 회차는 다른 이야기다. 그때는
+			// 거래소에 살아 있을 수 있는 우리 주문이 남아 있고, 그 상태로 다음
+			// 회차를 시작하면 노출이 두 회차에 걸쳐 겹친다.
+			//
+			// 2026-08-11 실거래에서 exec 이 "무장을 풀고 사람이 확인해야 한다"
+			// 를 로그에 찍은 **직후에** 이 배선이 다음 회차를 잡고 주문을 냈다.
+			// 그 구분이 여기 없었기 때문이다.
 			logf("회차 %s 실패: %v", t.round.Slug, err)
+			if exec.IsDisarm(err) {
+				halted = true
+				logf("🛑 거래 중단 — 새 회차를 잡지 않는다. 프로세스는 살려 둔다"+
+					" (감시가 계속 보이게, 그리고 재시작이 이 상태를 지우지 못하게).")
+				logf("   사람이 할 일: 거래소의 열린 주문을 확인하고, 원장과 대조한 뒤"+
+					" LIVE_ARM 을 다시 설정해 재시작한다.")
+			}
 		}
 	}
 }
