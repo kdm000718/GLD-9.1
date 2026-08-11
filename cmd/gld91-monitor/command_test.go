@@ -201,6 +201,29 @@ func TestStatusAdmitsMissingSettlement(t *testing.T) {
 	}
 }
 
+// **집행되지 않는 한도를 보여주면 안 된다.**
+//
+// `risk.DailyLimit.Breached` 는 시험 밖에서 불리는 곳이 없고 `DailyBreached` 를
+// 참으로 만드는 곳도 없다 — 봇은 하루에 얼마를 잃든 멈추지 않는다. 게다가
+// `DailyPnL` 은 스냅샷에 채워지지 않아 늘 0 이다(봇은 자기 실현손익을 모른다).
+// 그 둘을 나란히 찍으면 "0 손실 / 한도 −10.03" 이 되어 **보호받고 있다는
+// 인상만 준다.** 한도를 실제로 집행하게 되면 그때 되살린다.
+func TestStatusHidesUnenforcedDailyLimit(t *testing.T) {
+	st := stateWith(t, func(s *beat.Snapshot) {
+		s.Equity.DailyPnL, s.Equity.DailyLimit = 0, -10.03
+	})
+	reply, _ := routeCommand("/status", st, at())
+	for _, bad := range []string{"일손실", "한도", "-10.03"} {
+		if strings.Contains(reply, bad) {
+			t.Errorf("집행되지 않는 한도를 %q 로 보여준다:\n%s", bad, reply)
+		}
+	}
+	// 회차상한은 남아야 한다 — 이쪽은 실제로 집행된다(exec 의 노출 불변식).
+	if !strings.Contains(reply, "회차상한") {
+		t.Errorf("실제로 집행되는 회차상한까지 사라졌다:\n%s", reply)
+	}
+}
+
 // 노출 3항이 전부 보여야 한다. 취소미확인이 빠지면 exec 의 불변식 중 그 봇에만
 // 있는 항을 사람이 볼 수 없다.
 func TestStatusShowsAllThreeExposureTerms(t *testing.T) {

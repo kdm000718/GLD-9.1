@@ -90,8 +90,21 @@ func formatStatus(s *state, now time.Time) string {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "💰 가용 %.2f / 미정산 취득원가 %.2f USDT\n", snap.Equity.AvailableUSDT, snap.Equity.PositionCost)
-	fmt.Fprintf(&b, "   회차상한 %.2f · 일손실 %.2f / 한도 %.2f\n",
-		snap.Equity.CapUSD, snap.Equity.DailyPnL, snap.Equity.DailyLimit)
+	// **일손실과 한도는 싣지 않는다.**
+	//
+	// 그 한도는 집행되지 않는다. `risk.DailyLimit.Breached` 는 시험 밖에서
+	// 불리는 곳이 없고, `snapshotInput.DailyBreached` 를 참으로 만드는 곳도
+	// 없다. 봇은 하루에 얼마를 잃든 멈추지 않는다.
+	//
+	// 값 자체도 없다. `DailyPnL` 은 buildSnapshot 이 채우지 않아 늘 0 인데,
+	// 봇이 자기 실현손익을 모르기 때문이다 — 정산 결과는 거래소에만 있고
+	// 봇에 조회 경로가 없다(모니터가 그 구멍을 메운 이유다).
+	//
+	// 그래서 이 줄은 "0 손실 / 한도 −10.03" 을 찍고 있었다. **보호받고 있다는
+	// 인상만 주고 실제로는 아무것도 막지 않는다** — 없는 것을 0 으로 찍지
+	// 않는다는 이 함수의 원칙(위 주석)을 그 줄이 스스로 어기고 있었다.
+	// 한도를 집행하게 되면 그때 되살린다.
+	fmt.Fprintf(&b, "   회차상한 %.2f\n", snap.Equity.CapUSD)
 	fmt.Fprintf(&b, "📊 회차 %s (%s)\n", roundLabel(snap), snap.Round.Slug)
 	fmt.Fprintf(&b, "   노출 %.2f = 체결 %.2f + 미체결 %.2f + 취소미확인 %.2f / cap %.2f\n",
 		snap.Exposure.Filled+snap.Exposure.Open+snap.Exposure.PendingCancel,
