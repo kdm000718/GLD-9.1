@@ -42,6 +42,73 @@ type Open struct {
 	Live   bool      // 걸린 주문이 있는가
 }
 
+// Dwell 은 **목표가가 잠깐 스쳤을 뿐인지**를 가린다.
+//
+// # 왜 쿨다운으로는 못 막는가
+//
+// 재호가는 한 바퀴에 끝나지 않는다. `Reprice` 판정이 나오면 집행자는 취소만
+// 하고, 재주문은 거래소가 취소를 확인해 준 **다음 바퀴**에 일어난다(그래야
+// 노출이 두 배가 되지 않는다). 그 사이가 실측 51ms 다.
+//
+// 문제는 취소가 되돌릴 수 없다는 것이다. 51ms 뒤 재주문 시점에 목표가는 다시
+// 계산되고, 그동안 군중이 제자리로 돌아왔으면 **방금 버린 그 자리에 다시
+// 선다.** 큐 맨 뒤에서. 쿨다운은 "우리가 마지막으로 주문을 낸 뒤 얼마나
+// 지났는가"를 재므로 이것을 보지 못한다 — 실제로 쿨다운 500ms 는 정상
+// 작동하는 채로 이 일이 재호가의 46.8% 에서 일어났다(2026-08-11, 27,860건).
+//
+// # 임계값의 근거
+//
+// 같은 날 로그에서 군중 최우선 매수호가의 변화 41,182건을 재니 **76.6% 가
+// 5초 안에 직전 값으로 되돌아왔다.** 되돌아오기까지의 분포는 두 봉우리로
+// 갈렸다:
+//
+//	≤60ms      40.3%   ← 한 바퀴짜리 깜빡임
+//	60~400ms    0.0%   ← 비어 있다
+//	400~560ms  40.4%   ← 약 0.5초 진동
+//	560~1100ms  4.2%
+//	>1100ms    15.1%
+//
+// 600ms 는 두 봉우리를 모두 덮고 그 뒤의 빈 구간에 선다. 560~800ms 어디를
+// 골라도 걸러지는 잡음이 81~83% 로 평평해서 값에 민감하지 않다 — 근거 없이
+// 고른 임계가 아니다.
+//
+// # 이 패키지에서 유일하게 상태를 가진 것이다
+//
+// 나머지는 전부 순수 함수다. 그럼에도 여기 두는 이유는, 이것을 집행자에게
+// 맡기면 **틱 비교가 exec 으로 샌다.** 그 경계가 무너지면 가격 판단을 모의
+// 호가창 몇 개로 시험할 수 없게 된다(패키지 문서 참고). 상태는 회차 하나
+// 동안만 살고, 집행자는 이 값을 들여다보지 않는다.
+type Dwell struct {
+	// Need 는 목표가가 유지돼야 하는 시간이다. 0 이면 검사하지 않는다.
+	Need time.Duration
+
+	tick  int64
+	since time.Time
+	has   bool
+}
+
+// Observe 는 지금 목표가를 기록하고, 그것이 Need 만큼 유지됐는지 돌려준다.
+//
+// **매 바퀴 불러야 한다.** 재호가 직전에만 부르면 `since` 가 전진하지 않아
+// 조건이 영영 성립하지 않는다.
+//
+// 경계(경과 == Need)는 통과다. 쿨다운이 경계를 허용하는 것과 같은 규약이다.
+func (d *Dwell) Observe(tick int64, now time.Time) bool {
+	if d == nil {
+		return true
+	}
+	if !d.has || d.tick != tick {
+		d.tick, d.since, d.has = tick, now, true
+	}
+	if d.Need <= 0 {
+		return true
+	}
+	// 시계가 뒤로 갔으면(Sub 이 음수) 유지된 것으로 치지 않는다. 이 봇의
+	// now 는 단조시계에서 오지만, 그 보장이 깨지는 배선이 생겨도 여기서
+	// "충분히 유지됐다" 로 읽히면 안 된다.
+	return now.Sub(d.since) >= d.Need
+}
+
 // Action 은 집행자가 할 일이다.
 type Action int
 
@@ -152,7 +219,11 @@ func target(b Book) (tick int64, why string, ok bool) {
 //     최우선 호가에서는 큐 위치가 체결을 지배한다.
 //  5. 쿨다운 안: 미룬다. 경계(경과 == cooldown)는 허용한다.
 //  6. 재호가.
-func Decide(b Book, open Open, now time.Time, cooldown time.Duration, stale bool) Decision {
+//  7. 드웰: 목표가가 아직 흔들리는 중이면 미룬다. 취소는 되돌릴 수 없으므로
+//     큐 위치를 거는 판단은 목표가 굳은 뒤에 한다([Dwell] 참고).
+//
+// dwell 은 nil 이어도 된다 — 그때는 7번이 없다.
+func Decide(b Book, open Open, now time.Time, cooldown time.Duration, stale bool, dwell *Dwell) Decision {
 	// stale 경로는 target 을 호출하지 않고 빠져나가므로 precision 가드도
 	// 건너뛴다. 그러면 설정이 망가진 회차가 stale 인 동안 조용히 지나가다가
 	// stale 이 풀리는 임의의 시점에 터진다 — 틀렸다는 사실은 첫 판단에서
@@ -174,7 +245,13 @@ func Decide(b Book, open Open, now time.Time, cooldown time.Duration, stale bool
 		return Decision{Action: DoNothing, Why: why + " — 대기"}
 	}
 
+	// **매 바퀴 관측한다.** 아래 어느 가지로 빠지든 목표가의 나이는 계속
+	// 세어야 한다 — 재호가 직전에만 세면 `since` 가 전진하지 않는다.
+	held := dwell.Observe(tgt, now)
+
 	if !open.Live {
+		// 신규는 드웰을 보지 않는다. 큐에 아무것도 없으므로 잃을 큐 위치가
+		// 없고, 회차 초반을 통째로 비우면 그 회차의 엣지를 통째로 버린다.
 		return Decision{Action: Place, Tick: tgt, Why: fmt.Sprintf("신규 %d: %s", tgt, why)}
 	}
 
@@ -184,6 +261,12 @@ func Decide(b Book, open Open, now time.Time, cooldown time.Duration, stale bool
 
 	if elapsed := now.Sub(open.Placed); elapsed < cooldown {
 		return Decision{Action: DoNothing, Why: fmt.Sprintf("쿨다운 %v/%v — %d→%d 보류", elapsed, cooldown, open.Tick, tgt)}
+	}
+
+	if !held {
+		return Decision{Action: DoNothing, Why: fmt.Sprintf(
+			"목표 %d 가 아직 굳지 않았다(%v/%v) — %d 의 큐 위치를 걸지 않는다",
+			tgt, now.Sub(dwell.since).Truncate(time.Millisecond), dwell.Need, open.Tick)}
 	}
 
 	return Decision{Action: Reprice, Tick: tgt, Why: fmt.Sprintf("재호가 %d→%d: %s", open.Tick, tgt, why)}

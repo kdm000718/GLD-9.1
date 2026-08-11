@@ -220,6 +220,11 @@ type Runner struct {
 	// Cooldown 은 재호가 쿨다운이다(기본 500ms 는 배선의 몫 — 여기서는 0 이
 	// 유효한 값이다. 테스트가 쿨다운 없는 경우를 만들 수 있어야 한다).
 	Cooldown time.Duration
+	// Dwell 은 목표가가 굳어야 하는 시간이다. 쿨다운과 **다른 것을 잰다** —
+	// 쿨다운은 우리가 마지막으로 낸 뒤의 경과이고, 이쪽은 군중이 새 자리에
+	// 머문 시간이다. 근거와 실측은 quote.Dwell 문서에 있다. 0 이면 검사하지
+	// 않는다(쿨다운과 같은 규약 — 테스트가 없는 경우를 만들 수 있어야 한다).
+	Dwell time.Duration
 	// StaleAfter 는 오더북 신선도 문턱이다. 0 이하면 회차를 돌지 않는다 —
 	// 제로값이 "항상 stale" 로 읽혀도, "문턱 없음" 으로 읽혀도 둘 다 사고다.
 	StaleAfter time.Duration
@@ -339,6 +344,10 @@ type exposedOrder struct {
 // roundState 는 한 회차 동안의 우리 상태다. Runner 에 두지 않는 이유: Runner
 // 는 여러 회차에 재사용되고, 전 회차의 노출이 다음 회차로 새면 안 된다.
 type roundState struct {
+	// dwell 은 목표가가 굳었는지를 세는 상태다. **회차마다 새로 만든다** —
+	// 이전 회차의 목표가를 물려주면 새 회차의 첫 재호가가 남의 나이로
+	// 판단된다. 이 패키지는 안을 들여다보지 않는다(틱 비교는 quote 의 몫).
+	dwell *quote.Dwell
 	// live 는 지금 걸려 있는 주문이다. 이 봇은 한 번에 한 건만 건다.
 	live *openOrder
 	// pending 은 취소를 요청했지만 거래소가 사라졌다고 확인해 주지 **않은**
@@ -471,7 +480,7 @@ func (r *Runner) RunRound(ctx context.Context, rd live.Round, f live.Frozen, e r
 		return err
 	}
 
-	st := &roundState{}
+	st := &roundState{dwell: &quote.Dwell{Need: r.Dwell}}
 	loopErr := r.loop(ctx, rd, f, e, tokenID, st)
 	// 회차가 어떻게 끝났든 — 정상 종료든, 무장 해제든, ctx 취소든 — 살아 있는
 	// 주문은 반드시 거둔다. ctx 가 이미 죽었어도 취소는 나가야 하므로
@@ -679,7 +688,7 @@ func (r *Runner) loop(ctx context.Context, rd live.Round, f live.Frozen, e risk.
 		if st.live != nil {
 			qo = quote.Open{Tick: st.live.tick, Placed: st.live.placed, Live: true}
 		}
-		d := quote.Decide(qb, qo, now, r.Cooldown, stale)
+		d := quote.Decide(qb, qo, now, r.Cooldown, stale, st.dwell)
 
 		switch d.Action {
 		case quote.Place:

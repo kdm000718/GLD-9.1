@@ -237,6 +237,7 @@ func run(cfg *Config) error {
 		Fills:      fills,
 		Ledger:     l,
 		Cooldown:   cfg.Cooldown,
+		Dwell:      cfg.Dwell,
 		StaleAfter: cfg.StaleAfter,
 		Poll:       cfg.Poll,
 		Log:        logf,

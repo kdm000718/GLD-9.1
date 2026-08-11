@@ -194,7 +194,7 @@ func TestDecideSamePriceDoesNothing(t *testing.T) {
 	b := Book{BestBid: 47, HasBid: true, Precision: 2}
 	now := time.Unix(1000, 0)
 	open := Open{Tick: 47, Live: true, Placed: now.Add(-time.Hour)}
-	d := Decide(b, open, now, 500*time.Millisecond, false)
+	d := Decide(b, open, now, 500*time.Millisecond, false, nil)
 	if d.Action != DoNothing {
 		t.Errorf("action = %v, 기대 DoNothing — 같은 가격에 재주문하면 큐 맨 뒤로 밀린다", d.Action)
 	}
@@ -205,12 +205,12 @@ func TestDecideCooldownDefersReprice(t *testing.T) {
 	now := time.Unix(1000, 0)
 	// 400ms 전에 냈다 — 쿨다운 500ms 미만이므로 미룬다.
 	open := Open{Tick: 47, Live: true, Placed: now.Add(-400 * time.Millisecond)}
-	if d := Decide(b, open, now, 500*time.Millisecond, false); d.Action != DoNothing {
+	if d := Decide(b, open, now, 500*time.Millisecond, false, nil); d.Action != DoNothing {
 		t.Errorf("action = %v, 기대 DoNothing (쿨다운)", d.Action)
 	}
 	// 정확히 500ms 는 허용한다(경계 포함).
 	open.Placed = now.Add(-500 * time.Millisecond)
-	if d := Decide(b, open, now, 500*time.Millisecond, false); d.Action != Reprice {
+	if d := Decide(b, open, now, 500*time.Millisecond, false, nil); d.Action != Reprice {
 		t.Errorf("action = %v, 기대 Reprice (경계 500ms 는 허용)", d.Action)
 	}
 }
@@ -223,21 +223,21 @@ func TestDecideCooldownBoundaryToTheNanosecond(t *testing.T) {
 	cd := 500 * time.Millisecond
 
 	open := Open{Tick: 47, Live: true, Placed: now.Add(-cd + time.Nanosecond)}
-	if d := Decide(b, open, now, cd, false); d.Action != DoNothing {
+	if d := Decide(b, open, now, cd, false, nil); d.Action != DoNothing {
 		t.Errorf("경과 499.999999ms: action = %v, 기대 DoNothing", d.Action)
 	}
 	open.Placed = now.Add(-cd - time.Nanosecond)
-	if d := Decide(b, open, now, cd, false); d.Action != Reprice {
+	if d := Decide(b, open, now, cd, false, nil); d.Action != Reprice {
 		t.Errorf("경과 500.000001ms: action = %v, 기대 Reprice", d.Action)
 	}
 	// cooldown 0: 같은 순간에 냈어도 옮긴다.
 	open.Placed = now
-	if d := Decide(b, open, now, 0, false); d.Action != Reprice {
+	if d := Decide(b, open, now, 0, false, nil); d.Action != Reprice {
 		t.Errorf("cooldown=0: action = %v, 기대 Reprice", d.Action)
 	}
 	// 시계가 뒤로 갔거나 Placed 가 미래인 경우(음수 경과)는 쿨다운 안이다.
 	open.Placed = now.Add(time.Second)
-	if d := Decide(b, open, now, cd, false); d.Action != DoNothing {
+	if d := Decide(b, open, now, cd, false, nil); d.Action != DoNothing {
 		t.Errorf("Placed 가 미래: action = %v, 기대 DoNothing", d.Action)
 	}
 }
@@ -248,7 +248,7 @@ func TestDecideSamePriceWinsInsideCooldown(t *testing.T) {
 	b := Book{BestBid: 47, HasBid: true, Precision: 2}
 	now := time.Unix(1000, 0)
 	open := Open{Tick: 47, Live: true, Placed: now}
-	if d := Decide(b, open, now, 500*time.Millisecond, false); d.Action != DoNothing {
+	if d := Decide(b, open, now, 500*time.Millisecond, false, nil); d.Action != DoNothing {
 		t.Errorf("action = %v, 기대 DoNothing", d.Action)
 	}
 }
@@ -257,12 +257,12 @@ func TestDecideStaleCancelsAndBlocksNewOrders(t *testing.T) {
 	b := Book{BestBid: 47, HasBid: true, Precision: 2}
 	now := time.Unix(1000, 0)
 	// 걸린 주문이 있으면 취소한다.
-	d := Decide(b, Open{Tick: 47, Live: true, Placed: now.Add(-time.Hour)}, now, 0, true)
+	d := Decide(b, Open{Tick: 47, Live: true, Placed: now.Add(-time.Hour)}, now, 0, true, nil)
 	if d.Action != CancelOnly {
 		t.Errorf("stale 인데 action = %v, 기대 CancelOnly", d.Action)
 	}
 	// 없으면 아무것도 하지 않는다 — 오래된 호가로 새 주문을 내면 안 된다.
-	d = Decide(b, Open{}, now, 0, true)
+	d = Decide(b, Open{}, now, 0, true, nil)
 	if d.Action != DoNothing {
 		t.Errorf("stale + 무주문에서 action = %v, 기대 DoNothing", d.Action)
 	}
@@ -282,7 +282,7 @@ func TestDecideStaleOutranksEverything(t *testing.T) {
 		{"호가없음", Book{Precision: 2}},
 	}
 	for _, c := range cases {
-		if d := Decide(c.b, live, now, time.Hour, true); d.Action != CancelOnly {
+		if d := Decide(c.b, live, now, time.Hour, true, nil); d.Action != CancelOnly {
 			t.Errorf("%s + stale: action = %v, 기대 CancelOnly", c.name, d.Action)
 		}
 	}
@@ -290,7 +290,7 @@ func TestDecideStaleOutranksEverything(t *testing.T) {
 
 func TestDecidePlacesWhenNoOpenOrder(t *testing.T) {
 	b := Book{BestBid: 47, HasBid: true, Precision: 2}
-	d := Decide(b, Open{}, time.Unix(1000, 0), 500*time.Millisecond, false)
+	d := Decide(b, Open{}, time.Unix(1000, 0), 500*time.Millisecond, false, nil)
 	if d.Action != Place || d.Tick != 47 {
 		t.Errorf("action=%v tick=%d, 기대 Place 47", d.Action, d.Tick)
 	}
@@ -301,7 +301,7 @@ func TestDecidePlacesWhenNoOpenOrder(t *testing.T) {
 func TestDecidePlaceIgnoresCooldownAndStalePlacedTime(t *testing.T) {
 	b := Book{HasBid: false, Precision: 2}
 	now := time.Unix(1000, 0)
-	d := Decide(b, Open{Tick: 47, Live: false, Placed: now}, now, time.Hour, false)
+	d := Decide(b, Open{Tick: 47, Live: false, Placed: now}, now, time.Hour, false, nil)
 	if d.Action != Place || d.Tick != 49 {
 		t.Errorf("action=%v tick=%d, 기대 Place 49 (상한)", d.Action, d.Tick)
 	}
@@ -311,10 +311,10 @@ func TestDecidePlaceIgnoresCooldownAndStalePlacedTime(t *testing.T) {
 func TestDecideNoValidTarget(t *testing.T) {
 	b := Book{BestAsk: 1, HasAsk: true, Precision: 2}
 	now := time.Unix(1000, 0)
-	if d := Decide(b, Open{Tick: 44, Live: true, Placed: now.Add(-time.Hour)}, now, 0, false); d.Action != CancelOnly {
+	if d := Decide(b, Open{Tick: 44, Live: true, Placed: now.Add(-time.Hour)}, now, 0, false, nil); d.Action != CancelOnly {
 		t.Errorf("목표 무효 + 주문 있음: action = %v, 기대 CancelOnly", d.Action)
 	}
-	if d := Decide(b, Open{}, now, 0, false); d.Action != DoNothing {
+	if d := Decide(b, Open{}, now, 0, false, nil); d.Action != DoNothing {
 		t.Errorf("목표 무효 + 무주문: action = %v, 기대 DoNothing", d.Action)
 	}
 }
@@ -325,11 +325,11 @@ func TestDecideRepriceCarriesNewTick(t *testing.T) {
 	now := time.Unix(1000, 0)
 	open := Open{Tick: 47, Live: true, Placed: now.Add(-time.Hour)}
 	// 군중이 46 으로 내려갔다.
-	if d := Decide(Book{BestBid: 46, HasBid: true, Precision: 2}, open, now, 500*time.Millisecond, false); d.Action != Reprice || d.Tick != 46 {
+	if d := Decide(Book{BestBid: 46, HasBid: true, Precision: 2}, open, now, 500*time.Millisecond, false, nil); d.Action != Reprice || d.Tick != 46 {
 		t.Errorf("action=%v tick=%d, 기대 Reprice 46", d.Action, d.Tick)
 	}
 	// 관통 방지가 걸린 목표로 재호가: bid 47, ask 47 → 46.
-	if d := Decide(Book{BestBid: 47, HasBid: true, BestAsk: 47, HasAsk: true, Precision: 2}, open, now, 500*time.Millisecond, false); d.Action != Reprice || d.Tick != 46 {
+	if d := Decide(Book{BestBid: 47, HasBid: true, BestAsk: 47, HasAsk: true, Precision: 2}, open, now, 500*time.Millisecond, false, nil); d.Action != Reprice || d.Tick != 46 {
 		t.Errorf("action=%v tick=%d, 기대 Reprice 46 (관통 방지)", d.Action, d.Tick)
 	}
 }
@@ -354,7 +354,7 @@ func TestDecideCarriesNoTickWhenNotOrdering(t *testing.T) {
 		{"쿨다운", Book{BestBid: 46, HasBid: true, Precision: 2}, Open{Tick: 47, Live: true, Placed: now}, false, time.Hour},
 	}
 	for _, c := range cases {
-		d := Decide(c.b, c.open, now, c.cd, c.stale)
+		d := Decide(c.b, c.open, now, c.cd, c.stale, nil)
 		if d.Action == Place || d.Action == Reprice {
 			t.Fatalf("%s: 표본이 잘못됐다 — action = %v", c.name, d.Action)
 		}
@@ -389,7 +389,7 @@ func TestDecideAlwaysExplains(t *testing.T) {
 	}
 	seen := map[string]bool{}
 	for _, c := range cases {
-		d := Decide(c.b, c.open, now, c.cd, c.stale)
+		d := Decide(c.b, c.open, now, c.cd, c.stale, nil)
 		if d.Why == "" {
 			t.Errorf("%s: Why 가 비었다", c.name)
 			continue
@@ -408,11 +408,11 @@ func TestDecideGuardsPrecisionEvenWhenStale(t *testing.T) {
 	now := time.Unix(1000, 0)
 	for _, p := range []int{0, -1, 19, 20} {
 		p := p
-		mustPanic(t, "Decide(stale)", func() {
-			Decide(Book{BestBid: 47, HasBid: true, Precision: p}, Open{Tick: 47, Live: true}, now, 0, true)
+		mustPanic(t, "Decide(stale, nil)", func() {
+			Decide(Book{BestBid: 47, HasBid: true, Precision: p}, Open{Tick: 47, Live: true}, now, 0, true, nil)
 		})
-		mustPanic(t, "Decide(정상)", func() {
-			Decide(Book{BestBid: 47, HasBid: true, Precision: p}, Open{}, now, 0, false)
+		mustPanic(t, "Decide(정상, nil)", func() {
+			Decide(Book{BestBid: 47, HasBid: true, Precision: p}, Open{}, now, 0, false, nil)
 		})
 	}
 }
@@ -440,9 +440,9 @@ func TestDecideIsPureAndDoesNotMutateInput(t *testing.T) {
 	open := Open{Tick: 46, Live: true, Placed: now.Add(-time.Hour)}
 	bCopy, openCopy := b, open
 
-	first := Decide(b, open, now, 500*time.Millisecond, false)
+	first := Decide(b, open, now, 500*time.Millisecond, false, nil)
 	for i := 0; i < 5; i++ {
-		if got := Decide(b, open, now, 500*time.Millisecond, false); got != first {
+		if got := Decide(b, open, now, 500*time.Millisecond, false, nil); got != first {
 			t.Fatalf("%d회차 결과가 다르다: %+v vs %+v", i, got, first)
 		}
 	}
