@@ -173,7 +173,7 @@ func run(cfg *Config) error {
 	}
 
 	// --- 무장 판정 ----------------------------------------------------------
-	blockers := armingBlockers()
+	blockers := armingBlockers(ctx, secrets.Account)
 	armed := wantArm && canArm && reconcileOK && eqErr == nil && len(blockers) == 0
 	if wantArm && !armed {
 		// **조용히 DRY-RUN 으로 내려가지 않는다.** 무장을 요청한 운영자는

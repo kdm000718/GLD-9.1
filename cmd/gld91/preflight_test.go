@@ -15,8 +15,11 @@ import (
 	"github.com/kdm000718/GLD-9.1/internal/features"
 	"github.com/kdm000718/GLD-9.1/internal/kernel"
 	"github.com/kdm000718/GLD-9.1/internal/ledger"
+	"github.com/kdm000718/GLD-9.1/internal/onchain"
 	"github.com/kdm000718/GLD-9.1/internal/predictfun/auth"
+	"github.com/kdm000718/GLD-9.1/internal/predictfun/order"
 	"github.com/kdm000718/GLD-9.1/internal/predictfun/rest"
+	"github.com/kdm000718/GLD-9.1/internal/risk"
 )
 
 // --- 자가 점검 2: 서명자 대조 -------------------------------------------------
@@ -328,23 +331,67 @@ func TestReconcileTreatsCorruptLedgerAsMismatch(t *testing.T) {
 
 // --- 무장 차단 사유 --------------------------------------------------------------
 
-// 지금 남은 차단은 **자금·승인 하나뿐이다.** 셋(체결 조회, 서명 자리,
-// Exchange 변종)은 P5 Task 9 가 닫았고 그 근거는 armingBlockers 주석에 있다.
+// 자금·승인 차단은 **체인 조회**다(2026-08-11 자리표시자에서 교체).
+// 조회 자체의 시험은 `internal/onchain` 에 있다 — 여기서는 네트워크를 타지
+// 않는 배선만 본다.
 //
-// 이 테스트가 지키는 것은 두 방향이다.
+// 담보 주소를 모르면 조회할 대상이 없다. 그 상태를 "차단 사유 없음"으로
+// 읽으면 무장이 열린다.
+func TestArmingBlocksWithoutAccount(t *testing.T) {
+	for _, acct := range []string{"", "   "} {
+		bs := armingBlockers(context.Background(), acct)
+		if len(bs) == 0 {
+			t.Fatalf("account=%q 인데 차단 사유가 없다 — 담보 주소를 모르면 무장하면 안 된다", acct)
+		}
+		if !strings.Contains(bs[0], "PREDICT_ACCOUNT") {
+			t.Errorf("사유가 원인을 짚지 않는다: %q", bs[0])
+		}
+	}
+}
+
+// TestArmingSpendersCoversAllFourVariants 는 승인 확인 대상이 실제로 쓰는
+// 컨트랙트 넷과 **같은 출처**에서 오는지 본다.
 //
-//   - 목록이 비면 안 된다. 비었다는 것은 자금 없이 무장이 열렸다는 뜻이다.
-//   - 목록이 다시 늘어도 안 된다. 닫은 사유가 되살아나면 그 자리에 근거 없는
-//     문자열이 하나 더 생긴 것이고, 그때는 왜 되살아났는지를 사람이 봐야 한다.
-func TestOnlyFundingBlocksArmingNow(t *testing.T) {
-	bs := armingBlockers()
-	if len(bs) != 1 {
-		t.Fatalf("무장 차단 사유가 %d건이다 — 지금 남아야 할 것은 자금·승인 하나뿐이다: %v", len(bs), bs)
+// 주소를 이 파일이나 preflight.go 에 복사해 두면 order 의 표와 갈릴 수 있고,
+// 갈린 날 우리는 쓰지도 않는 컨트랙트의 승인을 확인하면서 정작 쓰는 쪽은
+// 확인하지 않는다. 그 실패는 무장 시점이 아니라 정산 시점에 드러난다.
+func TestArmingSpendersCoversAllFourVariants(t *testing.T) {
+	got, err := armingSpenders()
+	if err != nil {
+		t.Fatalf("armingSpenders: %v", err)
 	}
-	if strings.TrimSpace(bs[0]) == "" {
-		t.Fatal("사유가 비었다")
+	if len(got) != 4 {
+		t.Fatalf("승인 확인 대상이 %d개다 — 거래소 변종은 넷이다: %v", len(got), got)
 	}
-	if !strings.Contains(bs[0], "승인") || !strings.Contains(bs[0], "자금") {
-		t.Errorf("남은 사유가 자금·승인이 아니다: %q", bs[0])
+	for _, v := range []struct{ negRisk, yieldBearing bool }{
+		{false, false}, {true, false}, {false, true}, {true, true},
+	} {
+		name := order.ExchangeName(v.negRisk, v.yieldBearing)
+		want, err := order.ExchangeFor(order.ChainIDMainnet, v.negRisk, v.yieldBearing)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if got[name] != want {
+			t.Errorf("%s = %q, want %q — order.ExchangeFor 가 유일한 출처여야 한다",
+				name, got[name], want)
+		}
+	}
+}
+
+// TestArmingMinimumDerivesFromRiskConstants 는 최소 담보가 리터럴이 아니라
+// risk 상수에서 유도되는지 본다. 손으로 적어 두면 상한 비율을 바꿨을 때
+// 최소 담보가 따라오지 않고, 무장은 되는데 주문이 한 건도 못 나가는 상태가
+// 조용히 생긴다.
+func TestArmingMinimumDerivesFromRiskConstants(t *testing.T) {
+	want := onchain.Units(risk.MinOrderUSD / risk.CapFraction)
+	src, err := os.ReadFile("preflight.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(src), "risk.MinOrderUSD / risk.CapFraction") {
+		t.Error("최소 담보가 risk 상수에서 유도되지 않는다 — 리터럴이 박혔을 수 있다")
+	}
+	if want.Sign() <= 0 {
+		t.Fatalf("유도된 최소 담보가 %s 다", want)
 	}
 }

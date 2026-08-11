@@ -9,12 +9,16 @@ import (
 	"math"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/kdm000718/GLD-9.1/internal/features"
 	"github.com/kdm000718/GLD-9.1/internal/kernel"
 	"github.com/kdm000718/GLD-9.1/internal/model"
+	"github.com/kdm000718/GLD-9.1/internal/onchain"
 	"github.com/kdm000718/GLD-9.1/internal/predictfun/auth"
+	"github.com/kdm000718/GLD-9.1/internal/predictfun/order"
 	"github.com/kdm000718/GLD-9.1/internal/predictfun/rest"
+	"github.com/kdm000718/GLD-9.1/internal/risk"
 )
 
 // 이 파일은 기동 자가 점검이다. **주문이 하나라도 나가기 전에** 전부 본다.
@@ -234,10 +238,52 @@ func reconcile(ctx context.Context, rc *rest.Client, ledgerPath string) error {
 //	         bool 이면 빠진 값이 false 가 되고 false/false 는 하필 오늘 맞는
 //	         답이라, 파싱이 깨진 사실이 덮인다.
 //
-// 남은 하나(자금·승인)는 돈이 필요해서 코드로 닫을 수 없다.
-func armingBlockers() []string {
-	return []string{
-		// (4) 온체인 승인. 자금과 승인 없이는 어떤 주문도 체결되지 않는다.
-		"USDT 승인(approve)과 자금 입금이 확인되지 않았다",
+//	(닫힘 4) 자금·승인 — **체인에서 직접 본다.** 2026-08-11 까지 이 자리는
+//	         문자열 하나를 무조건 돌려주는 자리표시자였다. 돈이 없는 동안은
+//	         어떤 값이든 그 답이 맞았지만, 사용자가 승인을 마친 순간 그것은
+//	         거짓말이 되고 **거짓말인 채로 무장을 막는다.** 그러면 고치는
+//	         방법이 "검사를 지운다" 로 보이기 시작하고, 지우면 자금 없이
+//	         무장하는 길이 열린다. 그래서 지우지 않고 진짜 조회로 바꿨다
+//	         (`internal/onchain`).
+
+// armingSpenders 는 승인을 확인해야 할 거래소 컨트랙트 전부다.
+//
+// **주소를 여기 적지 않는다.** `order.ExchangeFor` 가 유일한 출처이고, 그
+// 표가 바뀌면 이 검사도 따라 바뀌어야 한다. 여기 상수로 복사하면 둘이 갈리고,
+// 갈린 날 우리는 **쓰지도 않는 컨트랙트의 승인을 확인하고** 실제로 쓰는
+// 컨트랙트는 확인하지 않는다.
+//
+// 넷을 전부 요구하는 이유는 `internal/onchain` 패키지 문서에 있다 — 어느
+// 변종이 올지는 회차 메타데이터를 받아야 알고, 그건 무장 판단보다 한참 뒤다.
+func armingSpenders() (map[string]string, error) {
+	out := map[string]string{}
+	for _, v := range []struct{ negRisk, yieldBearing bool }{
+		{false, false}, {true, false}, {false, true}, {true, true},
+	} {
+		addr, err := order.ExchangeFor(order.ChainIDMainnet, v.negRisk, v.yieldBearing)
+		if err != nil {
+			return nil, err
+		}
+		out[order.ExchangeName(v.negRisk, v.yieldBearing)] = addr
 	}
+	return out, nil
+}
+
+// armingBlockers 는 자금·승인 관점의 무장 차단 사유다. 빈 슬라이스면 통과다.
+//
+// account 는 담보를 들고 있는 주소(=주문의 maker)다. 조회가 실패하면 차단이다 —
+// 모르면 무장하지 않는다.
+func armingBlockers(ctx context.Context, account string) []string {
+	if strings.TrimSpace(account) == "" {
+		return []string{"PREDICT_ACCOUNT 가 비어 있다 — 담보 주소를 모르면 무장하지 않는다"}
+	}
+	spenders, err := armingSpenders()
+	if err != nil {
+		return []string{fmt.Sprintf("거래소 주소표를 읽지 못했다: %v", err)}
+	}
+	// 최소 담보는 **회차 하나를 낼 수 있는가**로 잡는다. cap 은 자본의
+	// CapFraction 이므로, 최소 주문 하나를 내려면 그만큼의 자본이 필요하다.
+	// 이보다 적으면 무장해도 주문이 한 건도 나가지 않는다.
+	min := onchain.Units(risk.MinOrderUSD / risk.CapFraction)
+	return onchain.Funding{}.Blockers(ctx, account, spenders, min)
 }
