@@ -279,9 +279,13 @@ func TestRemoveOrdersSeparatesRejected(t *testing.T) {
 	if gotAuth == "" {
 		t.Error("취소도 Bearer 가 필요하다 — Authorization 헤더가 없다")
 	}
-	ids, _ := gotBody["ids"].([]any)
+	// ids 는 `data` 봉투 안이다(스펙 RemoveOrdersRequest.required = [data]).
+	// 이 단언이 최상위 ids 를 보고 있었던 것이 2026-08-11 무장 실패가 시험을
+	// 통과한 채로 지나온 이유다. 봉투 자체의 시험은 envelope_test.go 에 있다.
+	data, _ := gotBody["data"].(map[string]any)
+	ids, _ := data["ids"].([]any)
 	if len(ids) != 3 {
-		t.Errorf("요청 본문 = %v, 기대 ids 3개", gotBody)
+		t.Errorf("요청 본문 = %v, 기대 data.ids 3개", gotBody)
 	}
 	if len(res.Removed) != 1 || res.Removed[0] != "a" {
 		t.Errorf("Removed = %v", res.Removed)

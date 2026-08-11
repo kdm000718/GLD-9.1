@@ -203,7 +203,17 @@ func (c *Client) CreateOrder(ctx context.Context, body any) (CreateOrderResult, 
 	}
 
 	var resp createOrderResponse
-	if err := c.PostAuth(ctx, "/v1/orders", body, &resp); err != nil {
+	// **`data` 봉투는 여기서 씌운다.** 스펙의 `CreateOrderRequest` 는
+	// `required: [data]` 이고 그 안이 `CreateOrderData` 다. 호출자는
+	// CreateOrderData 만 만들면 되고, 이 경로가 어떤 봉투를 요구하는지는
+	// 엔드포인트를 아는 이 층이 안다.
+	//
+	// 이걸 빠뜨리면 거래소는 400 으로 답한다:
+	//   Expected input type "CreateOrderData", found null.
+	// 2026-08-11 첫 무장에서 실제로 그랬고, 주문 182건이 전부 거부됐다.
+	// 손실은 없었지만 — **거부는 조용한 실패가 아니어서 다행이었다.**
+	// 같은 결함이 취소 경로(RemoveOrders)에도 있었고, 그쪽이 훨씬 위험했다.
+	if err := c.PostAuth(ctx, "/v1/orders", map[string]any{"data": body}, &resp); err != nil {
 		return CreateOrderResult{}, classifyCreate(err)
 	}
 	if err := resp.verdict(); err != nil {
@@ -313,7 +323,17 @@ func (c *Client) RemoveOrders(ctx context.Context, ids []string) (RemoveResult, 
 	}
 
 	var resp removeOrdersResponse
-	if err := c.PostAuth(ctx, "/v1/orders/remove", map[string]any{"ids": ids}, &resp); err != nil {
+	// **`data` 봉투.** 스펙의 `RemoveOrdersRequest` 도 `required: [data]` 이고
+	// 그 안이 `RemoveOrdersData{ids}` 다. 생성 경로와 같은 함정인데 이쪽이
+	// 훨씬 위험하다 — 생성이 400 이면 주문이 없어서 아무 일도 안 일어나지만,
+	// **취소가 400 이면 살아 있는 주문을 거둘 수 없다.** 노출 불변식 전체가
+	// 취소가 도달한다는 전제 위에 서 있다.
+	//
+	// 2026-08-11 첫 무장에서 생성 쪽 400 이 먼저 터지는 바람에 주문이 하나도
+	// 만들어지지 않았고, 그래서 이 결함이 드러나지 않은 채 지나갈 뻔했다.
+	if err := c.PostAuth(ctx, "/v1/orders/remove", map[string]any{
+		"data": map[string]any{"ids": ids},
+	}, &resp); err != nil {
 		return RemoveResult{}, fmt.Errorf("주문 취소 실패: %w", err)
 	}
 	if err := resp.verdict(); err != nil {
