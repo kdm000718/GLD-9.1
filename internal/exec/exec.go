@@ -333,6 +333,13 @@ type openOrder struct {
 	// lockUnknown 은 잠금 시각을 못 읽었다는 뜻이다. 그래도 취소는 시도한다 —
 	// 모른다는 이유로 시도하지 않으면 주문이 회차 끝까지 남는다.
 	lockUnknown bool
+	// filledBefore 는 이 주문을 낸 시점의 회차 누적 체결 주수다. 지금 이
+	// 주문에 귀속된 체결은 `st.filledShares - filledBefore` 다.
+	//
+	// **회차 누적만으로는 안 된다.** 앞선 주문이 5주 체결되고 사라진 뒤 8주
+	// 짜리 새 주문을 내면, 누적(5)과 새 주문의 수량(8)을 그냥 비교하는 것은
+	// 아무 뜻이 없다. 기준점이 있어야 "이 주문이 얼마나 찼는가" 를 말할 수 있다.
+	filledBefore float64
 }
 
 // exposedOrder 는 최우선 호가 계산에서 빼야 할 우리 물량이다.
@@ -389,6 +396,48 @@ func (st *roundState) exposure() risk.Exposure {
 		x.PendingCancel += o.notional
 	}
 	return x
+}
+
+// fillEpsilon 은 주수 비교의 여유다. 거래소는 wei 정수를, 우리는 float 을
+// 들고 있어 마지막 자리가 갈릴 수 있다. 실측 체결은 9.000000 대 9 였지만
+// 그 일치에 기대지 않는다.
+const fillEpsilon = 1e-9
+
+// retireFullyFilled 는 **전량 체결된 주문을 추적에서 뺀다.**
+//
+// # 왜 필요한가 — 같은 돈을 두 번 센다
+//
+// 체결이 들어오면 filledNotional 이 늘어난다. 그런데 그 주문은 여전히
+// st.live 에 남아 미체결로도 세어진다. 2026-08-11 첫 실체결에서 그대로
+// 일어났다: 체결 4.41 + 미체결 4.41 = 8.82 대 cap 4.56. 모니터가 노출
+// 불변식 위반으로 잡았다.
+//
+// 방향 자체는 보수적이다(덜 걸게 된다). 그러나 회계가 틀렸고, 더 나쁜 것은
+// **회차 종료 때 이미 사라진 주문을 취소하려 든다는 것**이다. 그 취소는
+// Removed 도 Noop 도 아닌 응답으로 돌아와 미확인으로 남고, 회차가 "사람이
+// 확인해야 한다" 로 끝난다. 체결이 나는 회차마다 그렇게 된다.
+//
+// # 추적 중인 주문이 하나일 때만 한다
+//
+// 체결에는 주문 식별자가 없다([Fills] 문서). 그래서 여러 주문을 들고 있을
+// 때 어느 것이 찼는지 확정할 수 없고, **잘못 짚으면 살아 있는 주문을
+// 추적에서 놓친다** — 그러면 아무도 그것을 취소하지 않고, 잊힌 매수 주문은
+// 체결된다. 이 패키지가 가장 피하려는 상태다.
+//
+// 그래서 모호하지 않은 경우에만 처리한다: live 하나뿐이고 취소 대기가 없을
+// 때. 이 봇은 한 번에 한 건만 걸므로 그것이 압도적인 다수이고, 실제로
+// 관측된 경우도 그것이다. 여러 건을 들고 있을 때는 예전처럼 둔다 — 이중
+// 계산이 남지만 그쪽은 덜 거는 방향이라 안전하다.
+func (st *roundState) retireFullyFilled() {
+	if st.live == nil || len(st.pending) > 0 {
+		return
+	}
+	if st.live.shares <= 0 {
+		return
+	}
+	if st.filledShares-st.live.filledBefore+fillEpsilon >= st.live.shares {
+		st.live = nil
+	}
 }
 
 // hasID 는 이 식별자를 이미 들고 있는지 본다.
@@ -787,6 +836,7 @@ func (r *Runner) transmit(ctx context.Context, st *roundState, req Request, now 
 		id: res.ID, tick: req.Tick.V, shares: req.Shares,
 		notional: req.Notional(), placed: now,
 		retryAt: retryAtFrom(res, now), lockUnknown: res.RemovalLockUnknown,
+		filledBefore: st.filledShares,
 	}
 	return nil
 }
@@ -1030,5 +1080,8 @@ func (r *Runner) absorbFills(ctx context.Context, rd live.Round, st *roundState)
 		st.filledNotional += cost
 		st.filledShares += f.Shares
 	}
+	// **체결을 흡수한 직후에 부른다.** 전량 체결된 주문은 호가창에 더 이상
+	// 없으므로 미체결로 세면 안 되고, 취소할 대상도 아니다.
+	st.retireFullyFilled()
 	return nil
 }
