@@ -52,4 +52,21 @@ monitor:
 monitor-soak:
 	go test -race -count=1 ./cmd/gld91-monitor/ ./cmd/gld91/ ./internal/beat/... ./internal/exec/
 
-.PHONY: build test vet goldencheck backtest align gates monitor monitor-soak
+# ---- Auto-Claim ----
+
+# G-claim — 골든 벡터 게이트. HAR 에 담긴 **실제로 성공한** claim 의
+# UserOperation 과 우리 조립을 바이트 단위로 대조한다: callData, nonce key,
+# userOpHash, 서명 형식. 이 게이트가 통과하기 전에는 전송을 붙이지 않았다.
+# `-count=1` 은 캐시 무시다 — 게이트가 캐시로 통과하면 게이트가 아니다.
+claimcheck:
+	go test -count=1 -run 'Golden|Selectors|Dummy|IndexSet|GetNonce' ./internal/claim/
+
+# 정산된 포지션 회수. **기본은 보내지 않는다** — 무엇을 보낼지만 찍는다.
+# 실제 회수는 CLAIM_ARM 이 필요하다:
+#   set -a; . ~/.config/predictfun/env; set +a
+#   make claim                                   # 조립까지만
+#   CLAIM_ARM=I_UNDERSTAND_THE_RISK make claim   # 실제 회수
+claim:
+	go run ./cmd/gld91-claim
+
+.PHONY: build test vet goldencheck backtest align gates monitor monitor-soak claimcheck claim
