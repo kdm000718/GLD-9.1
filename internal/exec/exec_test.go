@@ -1724,3 +1724,108 @@ func TestObservationsAreIndependent(t *testing.T) {
 		}
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 체결이 포지션이 된 뒤에도 다시 걸지 않는다
+// ---------------------------------------------------------------------------
+
+// **사용자가 물은 그 순서를 그대로 재현한다** (2026-08-12):
+// 주문이 체결되어 미체결이 포지션으로 바뀌면, 봇이 "걸린 주문이 없다"로 읽고
+// 같은 크기를 한 번 더 걸어 회차 명목이 상한의 두 배가 됐다.
+//
+// 그 경로에는 자리가 둘이다:
+//
+//  1. retireFullyFilled 가 전량 체결된 주문을 st.live 에서 뺀다 — 이중
+//     계산을 없애려고 넣은 것인데, **뺀 순간 "미체결 없음" 이 된다.**
+//  2. 예전에는 그 상태를 quote 가 Place 로 읽어 곧바로 다시 걸었다.
+//
+// 지금은 2번 자체가 없다(회차당 한 건). 그래도 이 시험을 두는 이유는,
+// 1번이 남아 있는 한 "미체결 없음" 상태가 회차 중간에 반드시 만들어지기
+// 때문이다 — 재주문 경로가 어떤 이유로든 되살아나면 이 시험이 먼저 깨진다.
+func TestFilledOrderBecomingAPositionDoesNotTriggerAnother(t *testing.T) {
+	h := newHarness(t)
+	// cap 4.55. 첫 주문은 9주 @0.47 = 4.23 이다.
+	const filled = 9
+
+	h.fills.pollFn = func(n int) ([]ledger.Fill, error) {
+		if n != 2 {
+			return nil, nil
+		}
+		// 걸어 둔 주문이 **전량 체결**된다 = 미체결이 포지션이 됐다.
+		return []ledger.Fill{{
+			RoundStart: h.round.StartsAt.Unix(), MarketID: h.round.MarketID,
+			Outcome: ledger.OutcomeUp, Shares: filled, PriceUSD: 0.47, At: h.clk.now(),
+		}}, nil
+	}
+	// 군중을 계속 흔든다. 예전 로직이라면 "미체결 없음 + 목표가 있음" 이
+	// 그대로 신규 주문이었다.
+	h.onStep = func(step int) {
+		if step%2 == 0 {
+			h.setCrowd(map[float64]float64{0.45: 100}, map[float64]float64{0.60: 100})
+		} else {
+			h.setCrowd(map[float64]float64{0.44: 100}, map[float64]float64{0.60: 100})
+		}
+	}
+
+	var peak float64
+	h.runner.Observe = func(o Observation) {
+		if tot := o.Exposure.Total(); tot > peak {
+			peak = tot
+		}
+	}
+	if err := h.run(); err != nil {
+		t.Fatalf("RunRound: %v", err)
+	}
+
+	h.orders.mu.Lock()
+	creates := append([]Request(nil), h.orders.creates...)
+	h.orders.mu.Unlock()
+
+	if len(creates) != 1 {
+		var ticks []int64
+		var sum float64
+		for _, r := range creates {
+			ticks = append(ticks, r.Tick.V)
+			sum += r.Notional()
+		}
+		t.Fatalf("주문 %d건(틱 %v, 명목 합 %.4f) — 체결이 포지션이 된 뒤 다시 걸었다", len(creates), ticks, sum)
+	}
+	// 회차 명목의 최댓값이 상한을 넘으면 안 된다. 실측 사고에서는 상한의
+	// 1.9배였다.
+	cap := risk.Cap(h.equity)
+	if placed := creates[0].Notional(); placed >= cap {
+		t.Errorf("건 명목 %.4f 가 상한 %.4f 이상이다", placed, cap)
+	}
+	if peak > cap+1e-9 {
+		t.Errorf("회차 중 관측된 노출 최댓값 %.4f > 상한 %.4f", peak, cap)
+	}
+	// 그리고 체결은 노출에서 사라지지 않아야 한다 — 나간 돈이다.
+	if peak < creates[0].Notional()-1e-9 {
+		t.Errorf("노출 최댓값 %.4f 가 건 명목 %.4f 보다 작다 — 체결이 노출에서 빠졌다", peak, creates[0].Notional())
+	}
+}
+
+// 취소가 확인된 주문이 사실은 체결돼 있던 경우 — 2026-08-11 의 실제 손실
+// 경로다. 지금은 회차 종료 취소에서만 일어나지만, 그 명목이 확인 전에
+// 풀리면 안 된다는 규약은 그대로다.
+func TestConfirmedCancelThatActuallyFilledKeepsItsNotional(t *testing.T) {
+	h := newHarness(t)
+	h.orders.filledFn = func(hash string) (float64, error) {
+		return 9, nil // 취소가 확인된 그 주문은 사실 전량 체결돼 있었다
+	}
+	var peak float64
+	h.runner.Observe = func(o Observation) {
+		if tot := o.Exposure.Total(); tot > peak {
+			peak = tot
+		}
+	}
+	if err := h.run(); err != nil && !isDisarm(err) {
+		t.Fatalf("RunRound: %v", err)
+	}
+	if n := h.orders.createdCount(); n != 1 {
+		t.Errorf("주문 %d건 — 취소 확인을 '안 찼다'로 읽고 다시 걸었다", n)
+	}
+	if cap := risk.Cap(h.equity); peak > cap+1e-9 {
+		t.Errorf("노출 최댓값 %.4f > 상한 %.4f", peak, cap)
+	}
+}
