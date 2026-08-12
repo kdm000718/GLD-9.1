@@ -277,73 +277,39 @@ func TestNewOrderBaselinesOnConfirmedFills(t *testing.T) {
 // 배선 — 위 시험들은 resolveConfirming 을 직접 부른다
 // ---------------------------------------------------------------------------
 
-// TestRoundNeverExceedsCapWhenACancelledOrderFills 는 2026-08-11 의 손실
-// 경로를 RunRound 로 재현한다.
+// 취소가 확인된 주문에는 **얼마나 찼는지 물어본다.** 이 배선이 빠지면 명목이
+// 영영 잠기고, 더 나쁘게는 취소를 "안 찼다"로 읽는 옛 사고로 되돌아간다.
 //
-// 첫 주문은 취소를 요청하지만 **그 순간 이미 체결돼 있다.** 거래소는
-// 그래도 removed 로 답한다(호가창에 없으니까). 고치기 전에는 봇이 노출 0
-// 이라 믿고 같은 크기를 다시 걸어 회차 명목이 두 배가 됐다.
-func TestRoundNeverExceedsCapWhenACancelledOrderFills(t *testing.T) {
+// 회차마다 한 번만 거는 지금은 그 취소가 회차 종료 취소뿐이라, 이 경로는
+// cancelEverything 안에서만 지난다 — 그래서 더더욱 배선을 못 박아야 한다.
+func TestCancelledOrderIsAskedWhetherItFilled(t *testing.T) {
 	h := newHarness(t)
 	cap := h.equity.AvailableUSDT * 0.0455
 
-	// 첫 주문(ord-0)은 취소 확인 뒤 "전량 체결됐다"고 답한다.
+	// 취소가 확인된 그 주문은 사실 전량 체결돼 있었다. 거래소는 그래도
+	// removed 로 답한다(호가창에 없으니까).
 	h.orders.filledFn = func(hash string) (float64, error) {
 		if hash == "hash-ord-0" {
-			return 9, nil // 첫 주문 수량
+			return 9, nil
 		}
 		return 0, nil
 	}
-	// 한 바퀴 뒤 군중이 움직여 재호가가 일어나게 한다.
-	h.onStep = func(n int) {
-		if n == 1 {
-			h.setCrowd(map[float64]float64{0.43: 100}, map[float64]float64{0.60: 100})
-		}
-	}
-
 	if err := h.run(); err != nil && !isDisarm(err) {
 		t.Fatalf("RunRound: %v", err)
 	}
-
-	// 걸린 명목의 합이 상한을 넘으면 안 된다. 실측 사고에서는 7.84 대 4.4 였다.
-	var placed float64
-	for _, r := range h.orders.creates {
-		placed += r.Notional()
-	}
-	if placed > cap+1e-9 {
-		t.Fatalf("이 회차에 건 명목 합계 %.4f > 상한 %.4f — 체결된 주문을 안 찼다고 쳤다 (건 주문: %d건)",
-			placed, cap, len(h.orders.creates))
-	}
-
 	if !h.orders.askedFor("hash-ord-0") {
 		t.Fatal("취소 확인된 주문의 체결 여부를 묻지 않았다 — 배선에 resolveConfirming 이 없다")
 	}
-}
 
-// 체결이 없으면 재호가가 막히지 않아야 한다. 위 수정이 "언제나 잠근다" 로
-// 굳으면 봇은 회차당 한 번만 걸고 군중을 따라가지 못한다.
-func TestUnfilledRepriceStillFlowsThroughTheLoop(t *testing.T) {
-	h := newHarness(t)
-	h.onStep = func(n int) {
-		switch n {
-		case 1:
-			h.setCrowd(map[float64]float64{0.43: 100}, map[float64]float64{0.60: 100})
-		case 4:
-			h.setCrowd(map[float64]float64{0.41: 100}, map[float64]float64{0.60: 100})
-		}
+	var placed float64
+	h.orders.mu.Lock()
+	for _, r := range h.orders.creates {
+		placed += r.Notional()
 	}
-	if err := h.run(); err != nil {
-		t.Fatalf("RunRound: %v", err)
-	}
-	// 하네스의 쿨다운(500ms)과 스텝(100ms×10)에서 재호가는 한 번 일어난다.
-	// 보는 것은 횟수가 아니라 **막히지 않았는가** 다: 첫 주문 뒤에 다른
-	// 틱으로 다시 걸렸으면 확인 대기가 회차를 잠그지 않은 것이다.
-	ticks := h.orders.createdTicks()
-	if len(ticks) < 2 {
-		t.Fatalf("주문 %d건 — 체결이 없는데 재호가가 막혔다 (걸린 틱: %v)", len(ticks), ticks)
-	}
-	if ticks[1] == ticks[0] {
-		t.Fatalf("같은 틱에 다시 걸었다: %v", ticks)
+	n := len(h.orders.creates)
+	h.orders.mu.Unlock()
+	if placed > cap+1e-9 {
+		t.Fatalf("이 회차에 건 명목 합계 %.4f > 상한 %.4f (건 주문: %d건)", placed, cap, n)
 	}
 }
 
@@ -352,11 +318,6 @@ func TestUnfilledRepriceStillFlowsThroughTheLoop(t *testing.T) {
 func TestRoundEndResolvesConfirming(t *testing.T) {
 	h := newHarness(t)
 	h.orders.filledFn = func(hash string) (float64, error) { return 0, nil }
-	h.onStep = func(n int) {
-		if n == 8 {
-			h.setCrowd(map[float64]float64{0.43: 100}, map[float64]float64{0.60: 100})
-		}
-	}
 	var last Observation
 	h.runner.Observe = func(o Observation) { last = o }
 
@@ -391,7 +352,7 @@ func TestUnresolvedOrderDoesNotRetireTheNextOne(t *testing.T) {
 	// 그 상태에서 B 를 **실제 경로로** 낸다. 기준점을 손으로 넣으면
 	// transmit 의 그 한 줄을 되돌려도 이 시험이 통과한다.
 	req := Request{Tick: order.NewTick(48, 2), Shares: 5, Outcome: ledger.OutcomeUp}
-	if err := h.r.transmit(context.Background(), h.st, req, now); err != nil {
+	if _, err := h.r.transmit(context.Background(), h.st, req, now); err != nil {
 		t.Fatalf("transmit: %v", err)
 	}
 	if h.st.live == nil {

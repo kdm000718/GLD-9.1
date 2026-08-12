@@ -51,6 +51,14 @@ func (c *fakeClock) advance(d time.Duration) {
 	c.mono += d.Nanoseconds()
 }
 
+// advanceMono 는 **단조시계만** 민다. 호가창을 낡게 만들되 회차는 끝내지
+// 않는 유일한 방법이다 — 벽시계를 밀면 EndsAt 을 지나 루프가 곧바로 끝난다.
+func (c *fakeClock) advanceMono(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.mono += d.Nanoseconds()
+}
+
 // fakeOrders 는 주문 전송을 가로챈다. 실제 predict.fun 을 절대 부르지 않는다.
 //
 // step 은 "몇 번째 폴링 주기에 이 요청이 나갔는가"를 기록한다. 쿨다운·잠금
@@ -293,10 +301,7 @@ func newHarness(t *testing.T) *harness {
 			UpTokenID:   "111",
 			DownTokenID: "222",
 		},
-		// equity 100 → cap 4.55. 이 크기면 우리 주문이 0.45 층에서 10주라
-		// 군중 100주에 묻힌다 — 합성 호가창이 우리 주문을 따로 싣지 않아도
-		// 제외 뺄셈이 군중 층을 통째로 지우지 않는다. (우리 물량이 층을
-		// 지배하는 경우는 TestLoopExcludesOurOwnOrderFromBestBid 가 따로 만든다.)
+		// equity 100 → cap 4.55. 지정가 0.47 이면 9주(명목 4.23)가 나간다.
 		equity: risk.Equity{AvailableUSDT: 100},
 	}
 	h.frozen = live.Frozen{
@@ -312,7 +317,6 @@ func newHarness(t *testing.T) *harness {
 		Orders:     h.orders,
 		Fills:      h.fills,
 		Ledger:     h.led,
-		Cooldown:   500 * time.Millisecond,
 		StaleAfter: 3 * time.Second,
 		Poll:       100 * time.Millisecond,
 		Clock:      h.clk.now,
@@ -336,9 +340,10 @@ func newHarness(t *testing.T) *harness {
 // setCrowd 는 **군중** 호가를 바꾼다. 실제 호가창은 여기에 우리 살아 있는
 // 주문을 얹은 것이다.
 //
-// 우리 주문을 하네스가 직접 얹는 것이 요점이다. 테스트가 손으로 "우리 주문이
-// 여기 있다"를 적으면, 취소된 뒤에도 그 층이 남아 제외를 빠뜨린 구현이
-// 우연히 통과한다(변이 M01 이 실제로 그 틈으로 살아남았다).
+// 봇이 군중을 따라가지 않게 된 뒤로도 이것이 필요한 이유는 두 가지다:
+// 주문 로그의 시장 기록(marketNote)이 방향에 맞는 값을 찍는지 봐야 하고,
+// **군중이 어떻게 움직이든 주문이 움직이지 않는다**는 것을 보이려면 움직이는
+// 군중이 있어야 한다.
 func (h *harness) setCrowd(bids, asks map[float64]float64) {
 	h.crowdBids, h.crowdAsks = bids, asks
 	h.refreshBook()
@@ -410,61 +415,123 @@ func (h *harness) run() error {
 }
 
 // ---------------------------------------------------------------------------
-// (1) exclude — 우리 주문을 최우선 호가에서 뺀다
+// (1) 회차마다 한 번, 한 가격
 // ---------------------------------------------------------------------------
 
-// 우리 주문이 군중보다 위에 홀로 남으면 **내려와야 한다.** exclude 를 빠뜨리면
-// BestBid 가 우리 자신이라 target == 우리 틱 이 되고, Decide 는 "동일가 유지"로
-// 영원히 그 자리에 머문다 — 자기 호가를 쫓는 순환이다. quote 테스트로는 절대
-// 잡히지 않는다(quote 는 이미 제외된 값을 받는다).
-func TestLoopExcludesOurOwnOrderFromBestBid(t *testing.T) {
+// 이 봇의 전부다: 회차 시작에 LimitPrice 로 한 건 걸고, 끝날 때까지 그대로 둔다.
+func TestRoundPlacesExactlyOneOrderAtTheLimitPrice(t *testing.T) {
 	h := newHarness(t)
-	// cap 4.55, 가격 0.47 → 우리 주문은 9주(4.23). 군중이 그 층에서 빠지면
-	// 그 층에 남는 것은 우리 9주뿐이다.
-	const ourShares = 9
-	// 0바퀴: 군중이 0.47 에 있다 → 우리도 0.47 에 건다.
-	h.setCrowd(map[float64]float64{0.47: 30}, map[float64]float64{0.60: 100})
-	// 1바퀴: 군중이 0.47 에서 통째로 빠진다. 그 층에 남는 것은 **우리 주문뿐**
-	// 이고(하네스가 얹는다) 군중의 최우선은 0.45 다.
-	//
-	// 우리 주문을 빼지 않는 구현은 그 층을 군중으로 읽어 "동일가 유지"로 굳고,
-	// 회차가 끝날 때까지 0.47 에 홀로 남는다.
+	if err := h.run(); err != nil {
+		t.Fatalf("RunRound: %v", err)
+	}
+	ticks := h.orders.createdTicks()
+	if len(ticks) != 1 {
+		t.Fatalf("주문 %d건 (틱 %v) — 회차당 한 건이어야 한다", len(ticks), ticks)
+	}
+	if ticks[0] != 47 {
+		t.Errorf("주문 틱 %d, 기대 47 (=%v)", ticks[0], LimitPrice)
+	}
+}
+
+// **군중이 어디로 가든 주문은 그대로다.** 예전 봇은 최우선 매수호가를 따라
+// 다녔다 — 그 경로가 남아 있으면 이 테스트가 잡는다.
+func TestCrowdMovesButTheOrderDoesNot(t *testing.T) {
+	h := newHarness(t)
+	// 위로도 아래로도, 0.5 위로도 움직여 본다. 예전 로직이라면 각각 다른
+	// 목표가를 냈을 자리다(추종 → 상한 → 추종).
 	h.onStep = func(step int) {
-		if step == 1 {
-			h.setCrowd(map[float64]float64{0.45: 100}, map[float64]float64{0.60: 100})
+		switch step {
+		case 1:
+			h.setCrowd(map[float64]float64{0.30: 100}, map[float64]float64{0.60: 100})
+		case 3:
+			h.setCrowd(map[float64]float64{0.55: 100}, map[float64]float64{0.60: 100})
+		case 5:
+			h.setCrowd(map[float64]float64{0.41: 100}, map[float64]float64{0.60: 100})
+		case 7:
+			h.setCrowd(map[float64]float64{0.49: 100}, map[float64]float64{0.60: 100})
 		}
 	}
 	if err := h.run(); err != nil {
 		t.Fatalf("RunRound: %v", err)
 	}
-	ticks := h.orders.createdTicks()
-	if len(ticks) < 2 {
-		t.Fatalf("주문이 %d건이다 (틱 %v) — 우리 호가를 제외하지 않아 내려오지 못했다", len(ticks), ticks)
+	if ticks := h.orders.createdTicks(); len(ticks) != 1 || ticks[0] != 47 {
+		t.Errorf("주문 틱 %v — 군중을 따라갔다. 이 봇은 회차당 47 한 건만 낸다", ticks)
 	}
-	if ticks[0] != 47 {
-		t.Errorf("첫 주문 틱 %d, 기대 47", ticks[0])
-	}
-	if ticks[1] != 45 {
-		t.Errorf("둘째 주문 틱 %d, 기대 45 — 우리 20주를 뺀 군중 최우선은 0.45 다", ticks[1])
+	// 취소는 회차 종료 한 번뿐이다. 그보다 많으면 옮긴 것이다.
+	if n := h.orders.removeCount(); n != 1 {
+		t.Errorf("취소 %d회 — 회차 종료 취소 1회만 나가야 한다(주문을 옮기지 않는다)", n)
 	}
 }
 
-// exclude 수량은 Qty 를 거쳐야 한다. 자연 단위를 그대로 넣으면 20주가 0.00002주로
-// 취급되어 우리 층이 그대로 남는다.
-func TestExcludeUsesFixedPointQuantity(t *testing.T) {
-	b := ws.NewBook(testPrecision)
-	f := ws.Frame{RecvMonoNs: 1}
-	f.Msg.Data = []byte(`{"bids":[[0.45,100],[0.47,20]],"asks":[],"updateTimestampMs":1}`)
-	if _, err := b.Apply(f); err != nil {
-		t.Fatal(err)
+// **관통 방지가 없다.** 매도호가가 0.47 이하라도 그대로 건다 — 즉시 체결되고
+// 테이커 수수료 2% 를 문다. 2026-08-12 사용자 결정이고, 알고 고른 손실이다.
+//
+// 이 테스트가 깨지는 날은 누군가 관통 방지를 되살린 날이고, 그것은 전략
+// 변경이므로 조용히 지나가면 안 된다.
+func TestOrderGoesOutEvenWhenItCrossesTheAsk(t *testing.T) {
+	h := newHarness(t)
+	h.setCrowd(map[float64]float64{0.30: 100}, map[float64]float64{0.40: 100})
+	if err := h.run(); err != nil {
+		t.Fatalf("RunRound: %v", err)
 	}
-	ex, exOK := excludeOurs([]exposedOrder{{tick: 47, shares: 20}})
-	if !exOK {
-		t.Fatal("20주를 제외 맵으로 만들지 못했다")
+	ticks := h.orders.createdTicks()
+	if len(ticks) != 1 || ticks[0] != 47 {
+		t.Errorf("주문 틱 %v, 기대 [47] — 매도호가 0.40 을 피해 내려갔다면 관통 방지가 되살아난 것이다", ticks)
 	}
-	got, ok := b.BestBid(ex)
-	if !ok || got != 45 {
-		t.Errorf("BestBid = %d,%v — 기대 45,true (우리 20주를 뺀 뒤)", got, ok)
+}
+
+// 지정가 틱은 정밀도에서 유도한다. 리터럴 47 을 박으면 precision 3 인 마켓에서
+// 0.047 에 걸린다 — 열 배 싼 가격이고, 채워지지 않는다.
+func TestLimitTickComesFromThePrecision(t *testing.T) {
+	for _, c := range []struct {
+		precision int
+		want      int64
+	}{{2, 47}, {3, 470}, {4, 4700}, {18, 470_000_000_000_000_000}} {
+		got, err := limitTick(c.precision)
+		if err != nil {
+			t.Fatalf("precision %d: %v", c.precision, err)
+		}
+		if got.V != c.want {
+			t.Errorf("precision %d → 틱 %d, 기대 %d", c.precision, got.V, c.want)
+		}
+		if got.Float() != LimitPrice {
+			t.Errorf("precision %d → 가격 %v, 기대 %v", c.precision, got.Float(), LimitPrice)
+		}
+	}
+}
+
+// precision 1 에서 0.47 은 존재하지 않는 가격이다. 0.4 나 0.5 로 반올림해 주면
+// 사용자가 정하지 않은 가격에 걸게 되고, 0.5 는 "0.5 미만" 제약도 깬다.
+func TestUnrepresentableLimitPriceIsAnError(t *testing.T) {
+	if _, err := limitTick(1); err == nil {
+		t.Fatal("precision 1 에서 0.47 을 만들어 냈다 — 표현할 수 없는 가격이다")
+	}
+	h := newHarness(t)
+	h.round.Precision = 1
+	h.book = ws.NewBook(1)
+	h.runner.Book = h.book
+	if err := h.run(); err == nil {
+		t.Fatal("precision 1 회차를 돌렸다")
+	}
+	if h.orders.createdCount() != 0 {
+		t.Error("표현할 수 없는 가격인데 주문이 나갔다")
+	}
+}
+
+// "0.5 미만 지정가 매수만" 은 사용자 제약이다. 상수를 잘못 고치는 날 그것이
+// 조용히 사라지지 않도록 가드가 살아 있는지 본다.
+func TestLimitPriceIsBelowHalf(t *testing.T) {
+	if LimitPrice >= 0.5 {
+		t.Fatalf("LimitPrice = %v — 0.5 미만이어야 한다", LimitPrice)
+	}
+	for _, p := range []int{2, 3, 4, 18} {
+		tk, err := limitTick(p)
+		if err != nil {
+			t.Fatalf("precision %d: %v", p, err)
+		}
+		if ceiling := order.Ceiling(p).V; tk.V > ceiling {
+			t.Errorf("precision %d: 틱 %d 가 상한 %d 을 넘는다", p, tk.V, ceiling)
+		}
 	}
 }
 
@@ -695,33 +762,53 @@ func TestUnknownCreateWithIDIsCancelledNotResent(t *testing.T) {
 	if n := h.orders.removeCount(); n == 0 {
 		t.Fatal("식별자가 있는데 취소를 시도하지 않았다")
 	}
-	h.orders.mu.Lock()
-	defer h.orders.mu.Unlock()
-	if len(h.orders.creates) < 2 {
-		t.Fatalf("주문 생성 %d회 — 취소가 확인된 뒤에는 다시 걸 수 있어야 한다", len(h.orders.creates))
-	}
-	// **다음 주문은 취소가 확인된 뒤에만 나간다.** 확인 전에 다시 걸면 그
-	// 순간 노출이 두 배다(불명 주문이 살아 있을 수 있다).
-	if h.orders.createSteps[1] <= h.orders.removeSteps[0] {
-		t.Errorf("둘째 주문이 %d스텝, 첫 취소가 %d스텝 — 취소 확인 전에 다시 걸었다",
-			h.orders.createSteps[1], h.orders.removeSteps[0])
+	// **다시 걸지 않는다.** 그 주문은 살아 있을 수 있고, 회차당 한 건이
+	// 이 봇의 규약이다.
+	if n := h.orders.createdCount(); n != 1 {
+		t.Errorf("주문 생성 %d회 — 결과 불명 주문을 두고 또 걸면 노출이 두 배다", n)
 	}
 }
 
-// 거래소가 명시적으로 거부한 주문은 존재하지 않는다 — 다시 시도해도 안전하다.
+// 거래소가 명시적으로 거부한 주문은 **존재하지 않는다.** 그때만 다시 낸다 —
+// 호가창에 우리 주문이 없으므로 "회차당 한 건" 은 깨지지 않고, 일시적 거부
+// 하나로 회차를 통째로 버릴 이유도 없다.
 func TestRejectedCreateMayBeRetried(t *testing.T) {
 	h := newHarness(t)
 	h.orders.createFn = func(n int, _ Request) (CreateResult, error) {
 		if n == 0 {
 			return CreateResult{}, &fakeOrderError{safe: true, msg: "거래소 거부"}
 		}
-		return CreateResult{ID: fmt.Sprintf("ord-%d", n)}, nil
+		id := fmt.Sprintf("ord-%d", n)
+		return CreateResult{ID: id, Hash: "hash-" + id}, nil
 	}
 	if err := h.run(); err != nil {
 		t.Fatalf("RunRound: %v", err)
 	}
-	if n := h.orders.createdCount(); n < 2 {
-		t.Errorf("주문 생성 %d회 — 거부된 주문은 존재하지 않으므로 다시 낼 수 있어야 한다", n)
+	if n := h.orders.createdCount(); n != 2 {
+		t.Errorf("주문 생성 %d회, 기대 2회 — 거부 1회 뒤 성공 1회", n)
+	}
+	// 그리고 곧바로 다시 두드리지 않는다. 루프 주기가 50~100ms 라 백오프가
+	// 없으면 회차 하나가 240 req/min 예산을 통째로 태운다.
+	h.orders.mu.Lock()
+	defer h.orders.mu.Unlock()
+	if gap := h.orders.createSteps[1] - h.orders.createSteps[0]; gap < 5 {
+		t.Errorf("재시도 간격이 %d스텝(=%dms)이다 — 기본 백오프 500ms 를 지키지 않았다", gap, gap*100)
+	}
+}
+
+// 그 재시도에는 상한이 있다. 없으면 계속 거부하는 회차에서 300초 내내
+// 요청을 퍼붓는다.
+func TestRetriesAreBounded(t *testing.T) {
+	h := newHarness(t)
+	h.runner.RejectBackoff = time.Millisecond // 상한이 없으면 매 바퀴 두드린다
+	h.orders.createFn = func(int, Request) (CreateResult, error) {
+		return CreateResult{}, &fakeOrderError{safe: true, msg: "계속 거부"}
+	}
+	if err := h.run(); err != nil {
+		t.Fatalf("RunRound: %v", err)
+	}
+	if n := h.orders.createdCount(); n != maxPlaceAttempts {
+		t.Errorf("주문 생성 시도 %d회, 기대 %d회", n, maxPlaceAttempts)
 	}
 }
 
@@ -753,11 +840,6 @@ func TestRejectedRemovalIsRetriedAndKeepsExposure(t *testing.T) {
 		}
 		return RemoveResult{Removed: ids}, nil
 	}
-	h.onStep = func(step int) {
-		if step == 1 {
-			h.setCrowd(map[float64]float64{0.40: 100}, map[float64]float64{0.60: 100})
-		}
-	}
 	if err := h.run(); err != nil {
 		t.Fatalf("RunRound: %v", err)
 	}
@@ -777,11 +859,6 @@ func TestUnaccountedRemovalKeepsOrderAndExposure(t *testing.T) {
 		}
 		return RemoveResult{Removed: ids}, nil
 	}
-	h.onStep = func(step int) {
-		if step == 1 {
-			h.setCrowd(map[float64]float64{0.40: 100}, map[float64]float64{0.60: 100})
-		}
-	}
 	if err := h.run(); err != nil {
 		t.Fatalf("RunRound: %v", err)
 	}
@@ -797,11 +874,6 @@ func TestUnknownRemovalLockStillAttemptsCancel(t *testing.T) {
 	h.orders.createFn = func(n int, _ Request) (CreateResult, error) {
 		return CreateResult{ID: fmt.Sprintf("ord-%d", n), RemovalLockUnknown: true}, nil
 	}
-	h.onStep = func(step int) {
-		if step == 1 {
-			h.setCrowd(map[float64]float64{0.40: 100}, map[float64]float64{0.60: 100})
-		}
-	}
 	if err := h.run(); err != nil {
 		t.Fatalf("RunRound: %v", err)
 	}
@@ -811,33 +883,10 @@ func TestUnknownRemovalLockStillAttemptsCancel(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// (7) Placed 는 Clock 에서 온다 — 파일에서 되읽지 않는다
+// (7) 시각은 Clock 에서 온다 — 파일에서 되읽지 않는다
 // ---------------------------------------------------------------------------
 
-// 쿨다운은 Placed 로부터 잰다. Placed 가 Clock 에서 오지 않으면 이 테스트가 깨진다.
-func TestRepriceWaitsForCooldownMeasuredFromClock(t *testing.T) {
-	h := newHarness(t)
-	h.runner.Cooldown = 500 * time.Millisecond // 폴링 100ms → 5스텝
-	h.onStep = func(step int) {
-		if step == 1 {
-			h.setCrowd(map[float64]float64{0.40: 100}, map[float64]float64{0.60: 100})
-		}
-	}
-	if err := h.run(); err != nil {
-		t.Fatalf("RunRound: %v", err)
-	}
-	// step1 에서 군중이 내려갔지만 쿨다운 500ms 가 지나야 취소가 나간다.
-	// 첫 주문은 step0(루프 첫 바퀴), 재호가 가능 시점은 그로부터 500ms 뒤.
-	if n := h.orders.removeCount(); n == 0 {
-		t.Fatal("쿨다운이 끝났는데 재호가하지 않았다")
-	}
-	if h.firstRemoveStep() < 5 {
-		t.Errorf("첫 취소가 %d스텝(=%dms)에 나갔다 — 쿨다운 500ms 를 지키지 않았다",
-			h.firstRemoveStep(), h.firstRemoveStep()*100)
-	}
-}
-
-// Placed 를 파일에서 되읽지 않는다 — 직렬화를 거치면 단조 성분이 사라진다.
+// 시각을 파일에서 되읽지 않는다 — 직렬화를 거치면 단조 성분이 사라진다.
 func TestExecNeverParsesPlacedFromFile(t *testing.T) {
 	for name, src := range packageSources(t) {
 		s := stripComments(src)
@@ -850,78 +899,19 @@ func TestExecNeverParsesPlacedFromFile(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// 계획서 Step 1 의 다섯 — 관통 방지·동일가 무동작·노출 상한·stale·회차 종료
+// 노출 상한·stale·회차 종료
 // ---------------------------------------------------------------------------
 
-// 같은 가격에서는 아무 요청도 나가지 않는다. 큐 위치가 체결을 지배한다.
-func TestLoopDoesNotReorderAtSamePrice(t *testing.T) {
+// cap 이 최소 주문 $1 을 못 채우면 아무것도 걸지 않는다. 그리고 **다시 묻지
+// 않는다** — 자본은 회차 시작에 동결된 값이라 답이 바뀔 수 없다.
+func TestTooSmallACapPlacesNothing(t *testing.T) {
 	h := newHarness(t)
-	// 호가창은 내내 그대로. 우리 주문이 얹히지만 exclude 로 빠지므로 target 불변.
-	h.onStep = func(step int) {
-		if step >= 1 {
-			h.setCrowd(map[float64]float64{0.45: 100}, map[float64]float64{0.60: 100})
-		}
-	}
+	h.equity = risk.Equity{AvailableUSDT: 10} // cap 0.455 < $1
 	if err := h.run(); err != nil {
 		t.Fatalf("RunRound: %v", err)
 	}
-	if n := h.orders.createdCount(); n != 1 {
-		t.Errorf("주문 %d건 — 같은 가격에 재주문하면 큐 맨 뒤로 밀린다", n)
-	}
-	if n := h.orders.removeCount(); n != 1 { // 회차 종료 취소 1회만
-		t.Errorf("취소 %d회 — 회차 종료 취소 1회만 나가야 한다", n)
-	}
-}
-
-// 관통 방지: 매도호가 아래 한 틱으로 내려가고 절대 그 위로 걸지 않는다.
-func TestLoopNeverCrossesTheAsk(t *testing.T) {
-	h := newHarness(t)
-	h.setCrowd(map[float64]float64{0.48: 100}, map[float64]float64{0.46: 100})
-	if err := h.run(); err != nil {
-		t.Fatalf("RunRound: %v", err)
-	}
-	ticks := h.orders.createdTicks()
-	if len(ticks) == 0 {
-		t.Fatal("주문이 나가지 않았다")
-	}
-	for i, tk := range ticks {
-		if tk >= 46 {
-			t.Errorf("%d번째 주문 틱 %d — 매도호가 46 을 관통했다(테이커 전락)", i, tk)
-		}
-	}
-	if ticks[0] != 45 {
-		t.Errorf("첫 주문 틱 %d, 기대 45 (ask 46 − 1틱)", ticks[0])
-	}
-}
-
-// 노출이 cap 에 닿으면 더 주문하지 않는다.
-func TestLoopStopsAtCap(t *testing.T) {
-	h := newHarness(t)
-	h.equity = risk.Equity{AvailableUSDT: 100} // cap 4.55
-	// 체결이 4.5 쌓이면 잔여 0.05 < $1 이라 더 못 낸다.
-	h.fills.pollFn = func(n int) ([]ledger.Fill, error) {
-		if n != 1 {
-			return nil, nil
-		}
-		return []ledger.Fill{{
-			RoundStart: h.round.StartsAt.Unix(), MarketID: h.round.MarketID,
-			Outcome: ledger.OutcomeUp, Shares: 10, PriceUSD: 0.45, At: h.clk.now(),
-		}}, nil
-	}
-	// 매 스텝 군중이 움직여 재호가를 유도한다.
-	h.runner.Cooldown = 0
-	h.onStep = func(step int) {
-		if step%2 == 0 {
-			h.setCrowd(map[float64]float64{0.45: 100}, map[float64]float64{0.60: 100})
-		} else {
-			h.setCrowd(map[float64]float64{0.44: 100}, map[float64]float64{0.60: 100})
-		}
-	}
-	if err := h.run(); err != nil {
-		t.Fatalf("RunRound: %v", err)
-	}
-	if n := h.orders.createdCount(); n != 1 {
-		t.Errorf("주문 %d건 — 체결 4.5 + cap 4.55 면 잔여가 $1 미만이라 더 못 낸다", n)
+	if n := h.orders.createdCount(); n != 0 {
+		t.Errorf("주문 %d건 — 잔여가 최소 주문에 못 미치면 걸지 않는다", n)
 	}
 }
 
@@ -947,84 +937,89 @@ func TestFirstOrderNeverExceedsCap(t *testing.T) {
 	}
 }
 
-// 취소 확인 전 주문도 노출로 센다. 빼면 취소·재주문 경합 순간에 노출이 두 배가 된다.
+// 취소 확인 전 주문의 명목은 노출에 남는다. 회차가 그 상태로 끝나면 에러다 —
+// 거래소에 살아 있을 수 있는 주문을 조용히 잊으면 안 된다.
 func TestPendingCancelCountsAsExposure(t *testing.T) {
 	h := newHarness(t)
-	h.equity = risk.Equity{AvailableUSDT: 100} // cap 4.55
-	h.runner.Cooldown = 0
-	h.runner.RejectBackoff = 10 * time.Second // 한 번 거부되면 이 회차 안에 재시도 없음
+	h.runner.RejectBackoff = 10 * time.Second
+	h.runner.FinalCancelTimeout = time.Second
 	h.orders.removeFn = func(n int, ids []string) (RemoveResult, error) {
 		return RemoveResult{Rejected: ids}, nil
-	}
-	h.onStep = func(step int) {
-		if step == 1 {
-			h.setCrowd(map[float64]float64{0.40: 100}, map[float64]float64{0.60: 100})
-		}
 	}
 	if err := h.run(); err == nil {
 		t.Fatal("취소를 확인하지 못한 채 회차가 끝났는데 에러가 아니다")
 	}
 	if n := h.orders.createdCount(); n != 1 {
-		t.Errorf("주문 %d건 — 취소 미확인분을 노출에서 빼면 안 된다", n)
+		t.Errorf("주문 %d건 — 회차당 한 건이어야 한다", n)
 	}
 }
 
 // removalLockedUntil 안에서는 취소를 시도하지 않는다. 거부당하고 요청만 낭비한다.
-func TestLoopRespectsRemovalLock(t *testing.T) {
-	h := newHarness(t)
-	h.runner.Cooldown = 0
-	lockFor := 600 * time.Millisecond
-	h.orders.createFn = func(n int, _ Request) (CreateResult, error) {
-		return CreateResult{
-			ID:          fmt.Sprintf("ord-%d", n),
-			LockedUntil: h.clk.now().Add(lockFor),
-		}, nil
+//
+// **회차 종료 취소만 남은 지금은 루프로 이 상태를 만들 수 없다** — 회차가 끝날
+// 즈음이면 잠금은 이미 풀려 있다. 그래서 sweepPending 을 직접 부른다. 가드를
+// 지우는 순간을 잡는 것이 이 테스트의 목적이고, 잠금 창은 거래소가 정하는
+// 값이라 언제든 길어질 수 있다.
+func TestSweepRespectsTheRemovalLock(t *testing.T) {
+	now := time.Unix(1000, 0)
+	st := &roundState{pending: []*openOrder{
+		{id: "locked", notional: 1, retryAt: now.Add(600 * time.Millisecond)},
+		{id: "free", notional: 1, retryAt: now},
+	}}
+	orders := &fakeOrders{}
+	r := &Runner{Orders: orders}
+	r.sweepPending(context.Background(), st, now)
+
+	orders.mu.Lock()
+	defer orders.mu.Unlock()
+	if len(orders.removes) != 1 {
+		t.Fatalf("취소 요청 %d회, 기대 1회", len(orders.removes))
 	}
-	h.onStep = func(step int) {
-		if step == 1 {
-			h.setCrowd(map[float64]float64{0.40: 100}, map[float64]float64{0.60: 100})
-		}
-	}
-	if err := h.run(); err != nil {
-		t.Fatalf("RunRound: %v", err)
-	}
-	if n := h.orders.removeCount(); n == 0 {
-		t.Fatal("취소가 한 번도 나가지 않았다")
-	}
-	// 첫 주문은 루프 첫 바퀴(0스텝)에 나갔다. 잠금은 600ms → 6스텝.
-	if s := h.firstRemoveStep(); s < 6 {
-		t.Errorf("첫 취소가 %d스텝(=%dms)에 나갔다 — 잠금 창(600ms) 안에서 취소를 시도했다", s, s*100)
+	if got := orders.removes[0]; len(got) != 1 || got[0] != "free" {
+		t.Errorf("취소 대상 %v — 잠금 창 안의 주문까지 보냈다", got)
 	}
 }
 
-// stale 이면 신규를 멈추고 기존을 취소한다.
-func TestLoopCancelsOnStale(t *testing.T) {
-	h := newHarness(t)
-	h.runner.StaleAfter = 300 * time.Millisecond // 3스텝이면 stale
-	if err := h.run(); err != nil {
-		t.Fatalf("RunRound: %v", err)
-	}
-	if h.orders.removeCount() == 0 {
-		t.Fatal("stale 인데 기존 주문을 취소하지 않았다")
-	}
-	// 회차 종료 취소(10스텝)가 아니라 stale 취소여야 한다.
-	if s := h.firstRemoveStep(); s > 5 {
-		t.Errorf("첫 취소가 %d스텝 — stale(3스텝) 직후에 취소해야 한다", s)
-	}
-	// 신규 차단은 TestStaleBlocksTheFirstOrderToo 가 따로 잡는다. 여기서는
-	// 셀 수 없다 — 우리 주문이 취소되면 호가창이 갱신되어 다시 신선해지고,
-	// 그 뒤에 새로 거는 것은 옳은 동작이다.
-}
-
-func TestStaleBlocksTheFirstOrderToo(t *testing.T) {
+// **낡은 호가창은 주문을 막지 않는다.** 가격이 상수라 호가창은 어떤 결정에도
+// 들어가지 않는다. 예전에는 stale 이면 신규를 멈추고 기존을 취소했는데, 지금
+// 그렇게 하면 근거 없이 회차를 버리는 일이다.
+func TestStaleBookDoesNotStopTheOrder(t *testing.T) {
 	h := newHarness(t)
 	h.runner.StaleAfter = time.Nanosecond
-	h.clk.advance(time.Second) // 이미 오래된 호가창
+	h.clk.advanceMono(time.Second) // 이미 오래된 호가창 (회차는 아직 살아 있다)
 	if err := h.run(); err != nil {
 		t.Fatalf("RunRound: %v", err)
 	}
-	if n := h.orders.createdCount(); n != 0 {
-		t.Errorf("주문 %d건 — 오래된 호가로 신규 주문을 내면 안 된다", n)
+	if n := h.orders.createdCount(); n != 1 {
+		t.Errorf("주문 %d건 — 호가창이 낡았다고 회차를 버리면 안 된다", n)
+	}
+	// 그리고 회차 중간에 취소하지 않는다. 취소는 회차 종료 한 번뿐이다.
+	if n := h.orders.removeCount(); n != 1 {
+		t.Errorf("취소 %d회 — stale 을 이유로 주문을 거뒀다", n)
+	}
+}
+
+// 다만 **기록에는 남는다.** 낡은 호가창으로 찍은 시장 값을 그대로 믿으면
+// "0.47 이 그때 좋은 가격이었나" 를 사후에 틀리게 답하게 된다.
+func TestStaleBookIsMarkedInTheLog(t *testing.T) {
+	h := newHarness(t)
+	h.runner.StaleAfter = time.Nanosecond
+	h.clk.advanceMono(time.Second)
+	var lines []string
+	h.runner.Log = func(format string, args ...any) {
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}
+	if err := h.run(); err != nil {
+		t.Fatalf("RunRound: %v", err)
+	}
+	found := false
+	for _, l := range lines {
+		if strings.Contains(l, "낡았다") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("낡은 호가창인데 주문 로그가 그 사실을 말하지 않는다: %v", lines)
 	}
 }
 
@@ -1226,61 +1221,10 @@ func TestFillsAreRecordedToTheLedger(t *testing.T) {
 // 극단값 — 지시받지 않은 조사에서 나온 것들
 // ---------------------------------------------------------------------------
 
-// **ws.Qty 의 int64 오버플로.** risk.Shares 는 2^53(≈9.0e15) 미만이면 통과
-// 시키는데 ws.QtyDecimals 가 6 이라 9.22e12 주만 넘어도 곱이 int64 를 넘는다.
-// 넘치면 exclude 값이 음수가 되고 `qty − exclude <= 0` 검사가 뒤집혀 **우리
-// 주문이 호가창에서 빠지지 않는다** — 에러도 로그도 없이 자기 호가를 쫓는다.
-func TestQtyOverflowWouldUnexcludeOurOrder(t *testing.T) {
-	// 오버플로가 실제로 부호를 뒤집는다는 것부터 확인한다.
-	huge := maxExcludableShares * 2
-	if got := ws.Qty(huge); got >= 0 {
-		t.Fatalf("Qty(%v) = %d — 이 테스트의 전제(오버플로가 음수를 만든다)가 깨졌다", huge, got)
-	}
-	if _, ok := excludeOurs([]exposedOrder{{tick: 47, shares: huge}}); ok {
-		t.Error("표현할 수 없는 수량을 제외 맵에 담았다")
-	}
-	// 건별로는 통과하지만 합이 넘치는 경우도 막아야 한다.
-	half := maxExcludableShares * 0.6
-	if _, ok := excludeOurs([]exposedOrder{{tick: 47, shares: half}, {tick: 47, shares: half}}); ok {
-		t.Error("합이 넘치는데 제외 맵을 만들었다")
-	}
-	// 경계 바로 아래는 정상이어야 한다 — 가드가 정상 주문을 막으면 안 된다.
-	if _, ok := excludeOurs([]exposedOrder{{tick: 47, shares: 1_000_000}}); !ok {
-		t.Error("100만주를 표현하지 못한다고 판정했다")
-	}
-}
-
-// 그런 크기의 주문은 애초에 내지 않는다. risk.Shares 가 통과시키는 구간
-// (2^53 미만)과 ws.Qty 가 표현하는 구간(9.2e12 이하)이 겹치지 않는 자리다.
-func TestRefusesOrdersTooLargeToExcludeFromTheBook(t *testing.T) {
+// 체결 명목이 NaN 이면(망가진 피드) 회차가 죽지 않고, 그 줄은 원장에
+// 들어가지 않는다. 파일이 오염되면 집계하는 쪽이 오염 사실조차 모른다.
+func TestNaNFillDoesNotKillTheRound(t *testing.T) {
 	h := newHarness(t)
-	h.round.Precision = 6
-	h.book = ws.NewBook(6)
-	h.runner.Book = h.book
-	h.ts = 0
-	// 틱 6 = 0.000006. cap 4.55e10 → floor(4.55e10/6e-6) ≈ 7.58e15 주.
-	// 2^53(9.0e15) 미만이라 risk.Shares 는 통과시키고, ws.Qty 는 넘친다.
-	h.setCrowd(map[float64]float64{0.000006: 1e6}, nil)
-	h.equity = risk.Equity{AvailableUSDT: 1e12}
-
-	// 전제 확인: risk 는 이 크기를 허용한다.
-	n := risk.Shares(risk.Cap(h.equity), 0.000006)
-	if n <= maxExcludableShares {
-		t.Fatalf("전제가 깨졌다: risk.Shares = %v 가 표현 상한 %v 이하다", n, maxExcludableShares)
-	}
-	if err := h.run(); err != nil {
-		t.Fatalf("RunRound: %v", err)
-	}
-	if c := h.orders.createdCount(); c != 0 {
-		t.Errorf("주문 %d건 — 호가창에서 뺄 수 없는 크기의 주문을 냈다", c)
-	}
-}
-
-// 체결 명목이 NaN 이면(망가진 피드) 더 걸지 않는다. risk 가 유한하지 않은
-// 노출에서 잔여 0 을 돌려주는 것에 기대는 연결이라 여기서 고정한다.
-func TestNaNFillStopsFurtherOrders(t *testing.T) {
-	h := newHarness(t)
-	h.runner.Cooldown = 0
 	h.fills.pollFn = func(n int) ([]ledger.Fill, error) {
 		if n != 1 {
 			return nil, nil
@@ -1290,24 +1234,12 @@ func TestNaNFillStopsFurtherOrders(t *testing.T) {
 			Outcome: ledger.OutcomeUp, Shares: math.NaN(), PriceUSD: 0.45, At: h.clk.now(),
 		}}, nil
 	}
-	// 매 스텝 군중이 움직여 재호가를 유도한다.
-	h.onStep = func(step int) {
-		if step%2 == 0 {
-			h.setCrowd(map[float64]float64{0.45: 100}, map[float64]float64{0.60: 100})
-		} else {
-			h.setCrowd(map[float64]float64{0.44: 100}, map[float64]float64{0.60: 100})
-		}
-	}
 	if err := h.run(); err != nil {
 		t.Fatalf("NaN 체결이 회차를 죽였다: %v", err)
 	}
-	if c := h.orders.createdCount(); c != 1 {
-		t.Errorf("주문 %d건 — NaN 노출에서는 더 걸면 안 된다", c)
-	}
-	// 원장에는 들어가지 않는다(ErrInvalidRecord). 파일이 오염되면 집계하는
-	// 쪽이 오염 사실조차 모른다.
+	// RecordFill 은 한 번만 불린다. 재시도하면 중복 체결 줄이 생긴다.
 	if h.led.count() != 1 {
-		t.Errorf("원장 기록 시도 %d회", h.led.count())
+		t.Errorf("원장 기록 시도 %d회, 기대 1회", h.led.count())
 	}
 }
 
@@ -1329,7 +1261,7 @@ func TestDuplicateOrderIDIsNotTracked(t *testing.T) {
 		Round: h.round, Outcome: ledger.OutcomeUp, TokenID: "111",
 		Tick: order.NewTick(44, testPrecision), Shares: 10,
 	}
-	if err := h.runner.transmit(context.Background(), st, req, h.clk.now()); err != nil {
+	if _, err := h.runner.transmit(context.Background(), st, req, h.clk.now()); err != nil {
 		t.Fatalf("transmit: %v", err)
 	}
 	if st.live.id == "same" && st.live.tick == 44 {
@@ -1512,15 +1444,11 @@ func TestRunnerObservesExposure(t *testing.T) {
 // 근거가 사라진다 — 개인키 없는 모니터는 미체결을 독립으로 조회할 수 없다.
 func TestObserveIncludesPendingCancels(t *testing.T) {
 	h := newHarness(t)
-	// 취소 요청은 받되 사라졌다고 확인해 주지 않는다.
+	// 취소 요청은 받되 사라졌다고 확인해 주지 않는다. 회차 종료 취소가
+	// 그렇게 끝나면 그 주문은 거래소에 살아 있을 수 있다.
+	h.runner.FinalCancelTimeout = 500 * time.Millisecond
 	h.orders.removeFn = func(_ int, ids []string) (RemoveResult, error) {
 		return RemoveResult{Unaccounted: append([]string(nil), ids...)}, nil
-	}
-	// 군중이 움직여 재호가(=취소)를 유발한다.
-	h.onStep = func(step int) {
-		if step == 3 {
-			h.setCrowd(map[float64]float64{0.46: 100}, map[float64]float64{0.60: 100})
-		}
 	}
 
 	var sawPending bool
@@ -1535,8 +1463,8 @@ func TestObserveIncludesPendingCancels(t *testing.T) {
 	}
 }
 
-// 첫 주문을 걸기만 해도 LastActionAt 이 찍혀야 한다. 재호가에서만 찍으면,
-// 한 번 걸고 군중이 안 움직이는 회차가 통째로 "아무 행동 없음" 으로 보인다.
+// 주문을 걸면 LastActionAt 이 찍혀야 한다. 이 봇은 회차당 한 번만 거므로
+// 여기서 안 찍히면 회차 전체가 "아무 행동 없음" 으로 보인다.
 func TestObserveStampsLastActionOnFirstPlace(t *testing.T) {
 	h := newHarness(t)
 	var first Observation
@@ -1552,11 +1480,8 @@ func TestObserveStampsLastActionOnFirstPlace(t *testing.T) {
 	if !once {
 		t.Fatal("주문이 걸린 관측이 없다")
 	}
-	if first.Reprices != 0 {
-		t.Fatalf("첫 주문인데 재호가가 %d 다 — 이 테스트가 재호가 경로를 보고 있다", first.Reprices)
-	}
 	if first.LastActionAt.IsZero() {
-		t.Error("주문을 걸었는데 LastActionAt 이 제로다 — 재호가에서만 찍고 있다")
+		t.Error("주문을 걸었는데 LastActionAt 이 제로다")
 	}
 }
 
@@ -1650,31 +1575,33 @@ func TestExecDoesNotImportBeat(t *testing.T) {
 	}
 }
 
-// 재호가 횟수와 마지막 행동 시각이 실제로 움직여야 한다. 이 값이 정체하면
-// 프로세스는 멀쩡한데 호가창에 아무 일도 하지 않는 상태이고, 감시가 그것을
-// 보는 유일한 근거다.
-func TestObserveTracksRepricesAndLastAction(t *testing.T) {
+// **LastActionAt 은 회차당 한 번만 움직인다.** 군중이 아무리 움직여도 우리는
+// 주문을 옮기지 않으므로, 이 값이 두 번 이상 바뀌면 어딘가 재호가 경로가
+// 되살아난 것이다.
+func TestLastActionMovesOnlyOnce(t *testing.T) {
 	h := newHarness(t)
-	var last Observation
-	h.runner.Observe = func(o Observation) { last = o }
-
-	// 군중이 위로 움직이면 우리도 따라 올라간다 = 재호가.
+	var stamps []time.Time
+	h.runner.Observe = func(o Observation) {
+		if o.LastActionAt.IsZero() {
+			return
+		}
+		if len(stamps) == 0 || !stamps[len(stamps)-1].Equal(o.LastActionAt) {
+			stamps = append(stamps, o.LastActionAt)
+		}
+	}
 	h.onStep = func(step int) {
 		switch step {
 		case 3:
 			h.setCrowd(map[float64]float64{0.46: 100}, map[float64]float64{0.60: 100})
 		case 6:
-			h.setCrowd(map[float64]float64{0.47: 100}, map[float64]float64{0.60: 100})
+			h.setCrowd(map[float64]float64{0.30: 100}, map[float64]float64{0.60: 100})
 		}
 	}
 	if err := h.run(); err != nil {
 		t.Fatalf("RunRound: %v", err)
 	}
-	if last.Reprices == 0 {
-		t.Error("군중이 두 번 움직였는데 재호가가 0 이다")
-	}
-	if last.LastActionAt.IsZero() {
-		t.Error("주문을 걸었는데 LastActionAt 이 제로다")
+	if len(stamps) != 1 {
+		t.Errorf("LastActionAt 이 %d번 움직였다 (%v) — 회차당 한 번이어야 한다", len(stamps), stamps)
 	}
 }
 

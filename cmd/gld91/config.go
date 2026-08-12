@@ -110,11 +110,11 @@ type Config struct {
 
 	Symbol string
 
-	// Cooldown 은 재호가 쿨다운이다(스펙 기본 500ms).
-	Cooldown time.Duration
-	// Dwell 은 목표가가 굳어야 하는 시간이다. 근거는 quote.Dwell 문서에 있다.
-	Dwell time.Duration
 	// StaleAfter 는 오더북 신선도 문턱이다(스펙 기본 3초).
+	//
+	// 거래를 막지 않는다 — 가격이 상수라 호가창은 어떤 결정에도 들어가지
+	// 않는다. 주문 로그에 "이 시장 기록은 낡았다"를 붙일지만 정한다
+	// (exec.Runner.StaleAfter).
 	StaleAfter time.Duration
 	// Poll 은 exec 루프 주기다.
 	Poll time.Duration
@@ -157,9 +157,8 @@ func Flags(fs *flag.FlagSet) *Config {
 	fs.StringVar(&c.LedgerPath, "ledger", "out/ledger.csv", "CSV 원장 경로")
 	fs.StringVar(&c.LockPath, "lock", "", "인스턴스 잠금 파일 (비면 <ledger>.lock)")
 	fs.StringVar(&c.Symbol, "symbol", live.SlugSymbol, "거래 심볼 접두사")
-	fs.DurationVar(&c.Cooldown, "cooldown", 500*time.Millisecond, "재호가 쿨다운")
-	fs.DurationVar(&c.Dwell, "dwell", 600*time.Millisecond, "재호가 전 목표가가 굳어야 하는 시간")
-	fs.DurationVar(&c.StaleAfter, "stale-after", 3*time.Second, "오더북 신선도 문턱")
+	fs.DurationVar(&c.StaleAfter, "stale-after", 3*time.Second,
+		"오더북 신선도 문턱. 거래를 막지 않고 주문 로그의 시장 기록에 '낡음' 표시만 붙인다")
 	fs.DurationVar(&c.Poll, "poll", exec.DefaultPoll, "집행 루프 주기")
 	fs.DurationVar(&c.FillsPoll, "fills-poll", DefaultFillsPollInterval,
 		"체결 조회(REST) 최소 간격. 이 값이 곧 노출 갱신 지연이다")
@@ -189,12 +188,6 @@ func checkConfig(c *Config) error {
 	}
 	if c.StaleAfter <= 0 {
 		return fmt.Errorf("-stale-after 가 %s 다 — 제로값은 '문턱 없음'이 아니라 '설정 안 됨'이다", c.StaleAfter)
-	}
-	if c.Dwell < 0 {
-		return fmt.Errorf("-dwell 이 음수다 (%s)", c.Dwell)
-	}
-	if c.Cooldown < 0 {
-		return fmt.Errorf("-cooldown 이 음수다 (%s)", c.Cooldown)
 	}
 	if c.Poll <= 0 {
 		return fmt.Errorf("-poll 이 %s 다", c.Poll)

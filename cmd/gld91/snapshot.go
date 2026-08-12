@@ -87,7 +87,11 @@ func buildSnapshot(in snapshotInput) beat.Snapshot {
 			Unaccounted:   in.Obs.Unaccounted,
 		},
 		Loop: beat.Loop{
-			Reprices:           in.Obs.Reprices,
+			// Reprices 는 항상 0 이다. 이 봇은 회차마다 한 가격에 한 번만 걸고
+			// 주문을 옮기지 않는다(exec 패키지 문서 참고). 필드를 지우지 않는
+			// 이유는 beat 가 별도로 배포된 모니터와의 계약이기 때문이다 —
+			// 보내는 쪽에서 빼면 받는 쪽 파싱이 조용히 제로값을 읽는데, 그건
+			// 지금 값과 같으므로 굳이 계약을 흔들 이유가 없다.
 			LastActionAt:       in.Obs.LastActionAt,
 			LastLoopAt:         in.Obs.LastLoopAt,
 			WSLastDataAt:       in.WSLastDataAt,

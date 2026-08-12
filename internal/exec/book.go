@@ -1,10 +1,11 @@
 package exec
 
 import (
+	"fmt"
+
 	"github.com/kdm000718/GLD-9.1/internal/ledger"
 	"github.com/kdm000718/GLD-9.1/internal/predictfun/order"
 	"github.com/kdm000718/GLD-9.1/internal/predictfun/ws"
-	"github.com/kdm000718/GLD-9.1/internal/quote"
 )
 
 // ---------------------------------------------------------------------------
@@ -40,14 +41,20 @@ import (
 // 이렇게 말한다 — `군중 55 는 0.5 이상 → 상한 49`. Up 매수호가가 0.55 면
 // **Down 의 진짜 매도호가는 0.45** 이므로, 0.49 매수는 관통이다.
 //
-// 그리고 이것은 수수료만의 문제가 아니다. Down 회차 내내 우리는 상관없는
-// 책을 보고 가격을 정하고 있었다.
+// # 지금 이 파일이 하는 일 — 판단이 아니라 기록이다
 //
-// # 그래서 이 파일이 하는 일
+// 2026-08-12 에 전략이 바뀌었다. 이 봇은 더 이상 군중을 따라가지도, 관통을
+// 피하지도 않는다. 회차마다 [LimitPrice] 한 가격에 한 번만 건다(exec.go 의
+// "회차마다 한 번, 한 가격" 참고). 그래서 여기서 만든 호가창은 **어떤 결정에도
+// 들어가지 않는다** — 주문을 낸 순간의 시장 모습을 로그 한 줄로 남기는 데만
+// 쓴다.
 //
-// 회차 방향에 따라 책을 뒤집어 **우리가 사려는 토큰 기준의 호가창**을 만든다.
-// quote 는 지금처럼 "내 토큰의 책"만 받으면 되고, 거울이 있다는 사실을 알
-// 필요가 없다.
+// 그럼에도 거울이 남아 있어야 하는 이유: 그 로그가 Down 회차에서 틀리면
+// "0.47 이 좋은 가격이었나"를 사후에 판단할 근거가 통째로 사라진다. 위의
+// 사고는 정확히 그 착각에서 나왔고, 기록이 같은 착각을 물려받으면 안 된다.
+//
+// **이 파일의 값을 읽어 가격이나 수량을 바꾸는 경로가 생기면 그것은 전략
+// 변경이다.** exec_test.go 의 TestBookNeverChangesTheOrder 가 그것을 막는다.
 
 // bookView 는 회차 방향에 맞춰 오더북을 읽는 방법이다.
 //
@@ -58,15 +65,15 @@ type bookView struct {
 	mirror bool
 	// full 은 가격 1.00 의 틱 수다. 거울은 이 값에서 빼서 만든다.
 	full int64
-	// precision 은 quote.Book 에 그대로 실린다.
+	// precision 은 틱을 사람이 읽는 가격으로 되돌릴 때 쓴다.
 	precision int
 }
 
 // newBookView 는 방향과 정밀도로 읽기 방법을 정한다.
 //
 // 방향 문자열을 정확히 두 철자만 받는다. 모르는 값이면 **거울을 걸지 않는
-// 쪽**이 아니라 에러다 — 조용히 Up 으로 읽으면 Down 회차 전체가 엉뚱한 책을
-// 보게 되고, 그게 바로 이 파일이 생긴 이유다.
+// 쪽**이 아니라 에러다 — 조용히 Up 으로 읽으면 Down 회차의 기록 전체가 엉뚱한
+// 책을 가리키게 되고, 그게 바로 이 파일이 생긴 이유다.
 func newBookView(direction string, precision int) (bookView, error) {
 	switch direction {
 	case ledger.OutcomeUp:
@@ -77,62 +84,56 @@ func newBookView(direction string, precision int) (bookView, error) {
 	return bookView{}, tokenDirectionError(direction)
 }
 
-// ourTicks 는 우리 주문을 **책의 좌표계**로 옮긴다.
+// sideBook 는 **우리가 사려는 토큰 기준**의 최우선 호가다.
 //
-// 우리 주문의 틱은 우리가 사는 토큰 기준이다. Down 주문 t 는 책에서
-// `full − t` 자리의 매도호가로 나타난다 — 거기서 빼야 우리 자신을 군중으로
-// 읽지 않는다.
-//
-// **이 변환이 빠지면 제외가 통째로 헛돈다.** Down 회차에서 우리 주문은 책의
-// 매도측에 있는데 제외는 매수측에 걸리므로, 아무것도 빠지지 않은 채 "우리
-// 주문을 뺐다"고 믿게 된다.
-func (v bookView) ourTicks(ours []exposedOrder) []exposedOrder {
-	if !v.mirror || len(ours) == 0 {
-		return ours
-	}
-	out := make([]exposedOrder, len(ours))
-	for i, o := range ours {
-		out[i] = exposedOrder{tick: v.full - o.tick, shares: o.shares}
-	}
-	return out
+// Has* 가 false 면 대응하는 틱은 의미가 없다.
+type sideBook struct {
+	BestBid int64
+	HasBid  bool
+	BestAsk int64
+	HasAsk  bool
 }
 
-// quoteBook 는 우리 토큰 기준의 호가창을 만든다.
+// sides 는 우리 토큰 기준의 최우선 호가를 읽는다.
 //
-// ex 는 [bookView.ourTicks] 를 거친 뒤 [excludeOurs] 가 만든 제외 맵이다.
-// 거울일 때는 우리 물량이 매도측에 있으므로 매도측에만 건다.
+// 우리 주문을 빼지 않는다. 뺄 이유가 없다 — 이 값은 아무것도 결정하지 않고,
+// 우리가 주문을 내는 순간은 회차당 한 번뿐이라 그 시점에 우리 물량은 책에
+// 없다.
 //
 // 거울 뒤에 틱이 0 이하가 되면 **그 쪽 호가는 없는 것으로 친다.** 0 은
-// 가격 0.00 이고, order.Tick.WeiPerShare 는 그 값에서 패닉한다 — 살아 있는
-// 주문을 든 채 죽는 자리를 만들지 않는다.
-func (v bookView) quoteBook(b bookReader, ex map[int64]ws.Shares) quote.Book {
+// 가격 0.00 이고, 그 값을 가격으로 되돌려 찍으면 로그가 거짓말을 한다.
+func (v bookView) sides(b bookReader) sideBook {
 	if !v.mirror {
-		bid, hasBid := b.BestBid(ex)
+		bid, hasBid := b.BestBid(nil)
 		ask, hasAsk := b.BestAsk(nil)
-		return quote.Book{
-			BestBid: bid, HasBid: hasBid,
-			BestAsk: ask, HasAsk: hasAsk,
-			Precision: v.precision,
-		}
+		return sideBook{BestBid: bid, HasBid: hasBid, BestAsk: ask, HasAsk: hasAsk}
 	}
 
-	// 거울. 우리 매수호가는 책의 매도측에서, 우리 매도호가는 책의 매수측에서
-	// 온다. 제외는 우리 물량이 있는 매도측에만 건다.
-	upAsk, hasUpAsk := b.BestAsk(ex)
+	// 거울. 우리 매수호가는 책의 매도측에서, 우리 매도호가는 책의 매수측에서 온다.
+	upAsk, hasUpAsk := b.BestAsk(nil)
 	upBid, hasUpBid := b.BestBid(nil)
 
-	qb := quote.Book{Precision: v.precision}
+	var s sideBook
 	if hasUpAsk {
 		if t := v.full - upAsk; t > 0 {
-			qb.BestBid, qb.HasBid = t, true
+			s.BestBid, s.HasBid = t, true
 		}
 	}
 	if hasUpBid {
 		if t := v.full - upBid; t > 0 {
-			qb.BestAsk, qb.HasAsk = t, true
+			s.BestAsk, s.HasAsk = t, true
 		}
 	}
-	return qb
+	return s
+}
+
+// label 은 틱을 사람이 읽는 가격으로 만든다. 없으면 "-" 다 — 0 으로 찍으면
+// "가격 0.00 에 호가가 있다"로 읽힌다.
+func (v bookView) label(tick int64, has bool) string {
+	if !has {
+		return "-"
+	}
+	return fmt.Sprintf("%v", order.NewTick(tick, v.precision).Float())
 }
 
 // bookReader 는 [ws.Book] 중 이 파일이 쓰는 두 메서드다. 인터페이스로 받는

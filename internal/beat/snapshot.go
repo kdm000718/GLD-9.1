@@ -177,12 +177,14 @@ type Exposure struct {
 // Loop 는 집행 루프의 살아있음이다. 여기 값들이 정체하면 프로세스는 멀쩡한데
 // 아무것도 하지 않는 상태다 — mtime 하트비트가 절대 잡지 못하는 고장이다.
 type Loop struct {
-	// Reprices 는 재호가(quote.Reprice) 판정 횟수다.
-	Reprices int64 `json:"reprices"`
-	// LastActionAt 은 마지막으로 주문을 **걸거나 옮긴** 시각이다.
+	// Reprices 는 재호가 횟수다.
 	//
-	// 이름이 "reprice" 가 아닌 이유: 한 번 걸고 군중이 안 움직이는 회차도
-	// 정상이고, 재호가만 세면 그런 회차가 통째로 "아무 행동 없음" 으로 보인다.
+	// **2026-08-12 이후로는 언제나 0 이다.** 봇이 회차마다 한 가격에 한 번만
+	// 걸고 주문을 옮기지 않게 바뀌었다(exec 패키지 문서). 필드를 남겨 두는
+	// 이유는 이것이 별도로 배포된 모니터와의 계약이기 때문이다 — 예전 스냅샷을
+	// 읽을 때도 뜻이 같아야 한다.
+	Reprices int64 `json:"reprices"`
+	// LastActionAt 은 이 회차의 주문을 건 시각이다. 회차당 한 번만 움직인다.
 	LastActionAt time.Time `json:"last_action_at"`
 	// LastLoopAt 은 집행 루프가 마지막으로 한 바퀴를 돈 시각이다.
 	//

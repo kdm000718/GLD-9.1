@@ -146,7 +146,6 @@ func TestCheckConfigRejectsBadValues(t *testing.T) {
 	}{
 		{"stale-after 0 (설정 안 됨)", func(c *Config) { c.StaleAfter = 0 }, "stale-after"},
 		{"stale-after 음수", func(c *Config) { c.StaleAfter = -time.Second }, "stale-after"},
-		{"cooldown 음수", func(c *Config) { c.Cooldown = -time.Millisecond }, "cooldown"},
 		{"poll 0", func(c *Config) { c.Poll = 0 }, "poll"},
 		{"round-poll 0", func(c *Config) { c.RoundPoll = 0 }, "round-poll"},
 		{"minutes 음수", func(c *Config) { c.Minutes = -1 }, "minutes"},

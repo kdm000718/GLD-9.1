@@ -88,7 +88,7 @@ func TestObserveKeepsRoundContext(t *testing.T) {
 	w := testWire(t)
 	r := live.Round{Slug: "btc-updown-5m-1", MarketID: 70, EndsAt: time.Now().Add(time.Minute)}
 	w.Report(snapshotInput{Round: r, Frozen: live.Frozen{Eligible: true, PUp: 0.53}, Equity: armable(), Active: true})
-	w.Observe(exec.Observation{Reprices: 9, Exposure: risk.Exposure{FilledNotional: 2}})
+	w.Observe(exec.Observation{FilledShares: 9, Exposure: risk.Exposure{FilledNotional: 2}})
 
 	got := published(t, w)
 	if got.Round.Slug != "btc-updown-5m-1" || got.Round.MarketID != 70 {
@@ -97,8 +97,8 @@ func TestObserveKeepsRoundContext(t *testing.T) {
 	if got.Round.PUp != 0.53 || got.Round.State != beat.RoundActive {
 		t.Errorf("자격·상태를 잃었다: %+v", got.Round)
 	}
-	if got.Loop.Reprices != 9 || got.Exposure.Filled != 2 {
-		t.Errorf("관측값이 안 실렸다: loop=%+v exposure=%+v", got.Loop, got.Exposure)
+	if got.Exposure.FilledShares != 9 || got.Exposure.Filled != 2 {
+		t.Errorf("관측값이 안 실렸다: exposure=%+v", got.Exposure)
 	}
 	if got.Version != "gld91 test" || !got.Armed {
 		t.Errorf("version=%q armed=%v", got.Version, got.Armed)

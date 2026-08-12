@@ -1,17 +1,26 @@
-// Package exec 는 한 회차를 실제로 운용한다 — 오더북을 읽고, 목표가에 주문을
-// 걸고, 군중을 따라 재호가하고, 회차가 끝나면 미체결을 전량 취소한다.
+// Package exec 는 한 회차를 실제로 운용한다 — 회차 시작에 동결된 방향으로
+// [LimitPrice] 에 매수호가를 **한 번** 걸고, 회차가 끝나면 미체결을 전량
+// 취소한다.
+//
+// # 회차마다 한 번, 한 가격
+//
+// 가격은 오더북이 정하지 않는다. 상수 [LimitPrice] 하나다. 그리고 그 주문은
+// 회차당 한 건뿐이다 — 옮기지 않고, 군중을 따라가지 않고, 취소했다가 다시
+// 걸지 않는다. 회차가 끝날 때까지 그 자리에 두고, 끝나면 거둔다.
+//
+// 그래서 이 봇에는 **관통 방지가 없다.** 상대 매도호가가 [LimitPrice] 이하인
+// 순간에 걸면 즉시 체결되고 명목의 2% 를 테이커 수수료로 문다. 그것을 알고
+// 고른 설계다(2026-08-12 사용자 결정) — 예전에는 매도호가 한 틱 아래로
+// 피했지만, 지금은 피하지 않는다. 이 문단을 지우기 전에 그 결정을 먼저
+// 뒤집어야 한다.
 //
 // # 이 패키지는 결정을 내리지 않는다
 //
-// 돈을 잃는 판단은 전부 `internal/quote`(어느 가격에 걸지, 옮길지 둘지)와
-// `internal/risk`(얼마를 걸지, 걸어도 되는지)에 있다. 여기서 하는 일은 그
-// 결정을 오더북·주문·시계에 연결하는 배선뿐이다. 이 경계가 무너지는 순간 —
-// 예를 들어 여기에 `if bestBid < …` 같은 가격 판단이 하나라도 생기면 — 이
-// 패키지는 모의 오더북으로 검증할 수 없게 된다. 값 몇 개로 시험할 수 있던
-// 판단이 네트워크·시계·상태에 얽힌 판단이 되기 때문이다.
-//
-// 그래서 이 파일에는 가격 비교가 없다. 틱을 비교하는 곳은 quote 뿐이고,
-// 금액을 비교하는 곳은 risk 뿐이다.
+// 돈을 잃는 판단은 [LimitPrice] 라는 상수 하나와 `internal/risk`(얼마를 걸지,
+// 걸어도 되는지)에 있다. 여기서 하는 일은 그 결정을 주문·시계에 연결하는
+// 배선뿐이다. 오더북을 읽는 자리가 하나 남아 있지만([Runner.marketNote])
+// 그 값은 로그로만 나간다 — 읽어서 가격이나 수량을 바꾸는 경로가 생기면
+// 그것은 전략 변경이고, book.go 의 경고가 그 자리를 지키고 있다.
 //
 // # 노출 불변식이 이 패키지의 존재 이유다
 //
@@ -43,8 +52,8 @@
 //
 // 살아 있는 주문을 든 채 죽으면 취소도 못 한다. 설정이 망가졌는지는 주문이
 // 하나라도 나가기 **전에** 전부 검사하고, 그 뒤로는 에러로만 빠져나온다.
-// 특히 `quote.Ceiling` 은 precision 이 1..18 밖이면 패닉하므로, 회차의
-// precision 을 [Runner.RunRound] 진입부에서 먼저 막는다.
+// 특히 `order.Full`·`order.Ceiling` 은 precision 이 1..18 밖이면 패닉하므로,
+// 회차의 precision 을 [Runner.RunRound] 진입부에서 먼저 막는다.
 //
 // # 아직 비어 있는 자리 — 정산
 //
@@ -72,7 +81,6 @@ import (
 	"github.com/kdm000718/GLD-9.1/internal/live"
 	"github.com/kdm000718/GLD-9.1/internal/predictfun/order"
 	"github.com/kdm000718/GLD-9.1/internal/predictfun/ws"
-	"github.com/kdm000718/GLD-9.1/internal/quote"
 	"github.com/kdm000718/GLD-9.1/internal/risk"
 	"github.com/kdm000718/GLD-9.1/internal/timing"
 )
@@ -181,6 +189,67 @@ type FillRecorder interface {
 type retryClassifier interface{ SafeToRetry() bool }
 
 // ---------------------------------------------------------------------------
+// 지정가 — 이 봇이 거는 유일한 가격
+// ---------------------------------------------------------------------------
+
+// 가격을 **정수 두 개**로 들고 있는 이유: 틱은 정밀도마다 다르고(정밀도 2 면
+// 47, 3 이면 470), 실수 0.47 에 10^precision 을 곱해 반올림하는 식으로 만들면
+// 정밀도가 커질수록 마지막 자리가 갈릴 여지가 생긴다. 나눗셈이 딱 떨어지는지
+// 검사하는 정수 경로에는 그 여지가 없다 — 표현할 수 없는 정밀도는 조용히
+// 근사되는 대신 에러가 된다([limitTick]).
+const (
+	limitPriceNum = 47
+	limitPriceDen = 100
+)
+
+// LimitPrice 는 이 봇이 매수호가를 거는 가격이다. 회차마다 이 가격에 한 번만
+// 건다.
+//
+// **상수인 것이 요점이다.** 플래그로 빼면 운영 중에 값이 바뀔 수 있고, 그러면
+// 원장의 어떤 줄이 어떤 가격 정책으로 나갔는지 사후에 알 수 없다(2026-08-12
+// 사용자 결정). 바꾸려면 이 줄을 고치고 다시 빌드해 배포해야 한다.
+//
+// 판단에 쓰지 않는다 — 실제 틱은 [limitTick] 이 정수로 만든다. 이 값은 로그와
+// 문서용이다.
+const LimitPrice = float64(limitPriceNum) / float64(limitPriceDen)
+
+// limitTick 은 이 회차의 정밀도에서 [LimitPrice] 에 해당하는 틱이다.
+//
+// 두 가지를 막는다:
+//
+//	표현 불가   정밀도 1 인 마켓에서 0.47 은 존재하지 않는 가격이다. 0.4 나
+//	            0.5 로 반올림해 주면 **사용자가 정하지 않은 가격에 건다** —
+//	            게다가 0.5 는 아래의 상한 검사에도 걸리는 값이다.
+//	0.5 이상    "0.5 미만 지정가 매수만" 은 사용자 제약이다. 상수를 잘못 고치는
+//	            날 그 제약이 조용히 사라지지 않도록 여기서 한 번 더 본다.
+//
+// precision 은 [Runner.check] 가 1..18 로 이미 막았다 — 그래야 order.Full 이
+// 패닉하지 않는다.
+func limitTick(precision int) (order.Tick, error) {
+	full := order.Full(precision)
+	if full%limitPriceDen != 0 {
+		return order.Tick{}, fmt.Errorf("exec: precision %d 에서는 지정가 %d/%d 를 표현할 수 없다",
+			precision, limitPriceNum, limitPriceDen)
+	}
+	v := limitPriceNum * (full / limitPriceDen)
+	if ceiling := order.Ceiling(precision).V; v > ceiling {
+		return order.Tick{}, fmt.Errorf("exec: 지정가 틱 %d 가 0.5 미만 상한 %d 을 넘는다 (지정가 %v)",
+			v, ceiling, LimitPrice)
+	}
+	return order.NewTick(v, precision), nil
+}
+
+// maxPlaceAttempts 는 주문 생성을 다시 시도하는 횟수의 상한이다.
+//
+// **재시도는 "아무것도 나가지 않았음이 확정된" 실패에서만 한다**([safeToRetry]).
+// 그 조건에서는 호가창에 우리 주문이 없으므로 다시 보내도 한 건을 넘지 않는다 —
+// "회차당 한 건" 은 깨지지 않는다.
+//
+// 상한이 필요한 이유는 루프 주기가 50ms 라는 것이다. 상한이 없으면 계속
+// 실패하는 회차에서 300초 동안 요청을 퍼붓고 240 req/min 예산을 태운다.
+const maxPlaceAttempts = 3
+
+// ---------------------------------------------------------------------------
 // 기본값
 // ---------------------------------------------------------------------------
 
@@ -227,19 +296,6 @@ const (
 // $2,200 을 넘으면 100 을 넘길 수 있다.
 const maxRemoveBatch = 100
 
-// maxExcludableShares 는 [ws.Qty] 가 int64 로 표현할 수 있는 최대 주식 수다.
-//
-// **이 상한을 넘는 주문은 내지 않는다.** 넘으면 ws.Qty 의 int64 변환이 넘쳐
-// 음수가 되고, BestBid 의 `qty − exclude[t] <= 0` 검사가 뒤집혀 **우리 주문이
-// 호가창에서 제외되지 않는다** — 봇이 자기 호가를 쫓는 바로 그 고장이다.
-// 에러도 로그도 없이 일어난다.
-//
-// 도달 가능한 경로가 실제로 있다: risk.Shares 는 2^53(≈9.0e15) 미만이면
-// 통과시키는데 ws.QtyDecimals 가 6 이므로 9.2e12 주만 넘어도 곱이 int64 를
-// 넘는다. precision 이 6 이상인 마켓에서 저가 틱이면 그 구간에 들어간다
-// (실측된 precision 은 2·3 이지만 ws.MaxPrecision 은 18 을 허용한다).
-var maxExcludableShares = float64(math.MaxInt64) / math.Pow(10, ws.QtyDecimals)
-
 // ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
@@ -261,16 +317,16 @@ type Runner struct {
 	// Ledger 는 체결 기록이다.
 	Ledger FillRecorder
 
-	// Cooldown 은 재호가 쿨다운이다(기본 500ms 는 배선의 몫 — 여기서는 0 이
-	// 유효한 값이다. 테스트가 쿨다운 없는 경우를 만들 수 있어야 한다).
-	Cooldown time.Duration
-	// Dwell 은 목표가가 굳어야 하는 시간이다. 쿨다운과 **다른 것을 잰다** —
-	// 쿨다운은 우리가 마지막으로 낸 뒤의 경과이고, 이쪽은 군중이 새 자리에
-	// 머문 시간이다. 근거와 실측은 quote.Dwell 문서에 있다. 0 이면 검사하지
-	// 않는다(쿨다운과 같은 규약 — 테스트가 없는 경우를 만들 수 있어야 한다).
-	Dwell time.Duration
-	// StaleAfter 는 오더북 신선도 문턱이다. 0 이하면 회차를 돌지 않는다 —
-	// 제로값이 "항상 stale" 로 읽혀도, "문턱 없음" 으로 읽혀도 둘 다 사고다.
+	// StaleAfter 는 오더북 신선도 문턱이다.
+	//
+	// **더 이상 거래를 막지 않는다.** 가격이 상수가 된 뒤로 호가창은 어떤
+	// 결정에도 들어가지 않으므로, 호가창이 낡았다는 이유로 주문을 미루면
+	// 그것은 근거 없이 회차를 버리는 일이다. 지금 이 값이 하는 일은 하나다 —
+	// 주문을 낸 순간의 시장 기록([Runner.marketNote])에 "이 값은 낡았다"는
+	// 표시를 붙일지 정한다.
+	//
+	// 그럼에도 0 이하를 거부하는 이유: 제로값이 "항상 stale" 로 읽혀도,
+	// "문턱 없음" 으로 읽혀도 기록이 거짓말을 한다.
 	StaleAfter time.Duration
 	// Poll 은 루프 주기다. 0 이면 DefaultPoll.
 	Poll time.Duration
@@ -404,20 +460,10 @@ type openOrder struct {
 	filledBefore float64
 }
 
-// exposedOrder 는 최우선 호가 계산에서 빼야 할 우리 물량이다.
-type exposedOrder struct {
-	tick   int64
-	shares float64
-}
-
 // roundState 는 한 회차 동안의 우리 상태다. Runner 에 두지 않는 이유: Runner
 // 는 여러 회차에 재사용되고, 전 회차의 노출이 다음 회차로 새면 안 된다.
 type roundState struct {
-	// dwell 은 목표가가 굳었는지를 세는 상태다. **회차마다 새로 만든다** —
-	// 이전 회차의 목표가를 물려주면 새 회차의 첫 재호가가 남의 나이로
-	// 판단된다. 이 패키지는 안을 들여다보지 않는다(틱 비교는 quote 의 몫).
-	dwell *quote.Dwell
-	// live 는 지금 걸려 있는 주문이다. 이 봇은 한 번에 한 건만 건다.
+	// live 는 지금 걸려 있는 주문이다. 이 봇은 회차당 한 건만 건다.
 	live *openOrder
 	// pending 은 취소를 요청했지만 거래소가 사라졌다고 확인해 주지 **않은**
 	// 주문이다. 명목은 여전히 노출에 있다.
@@ -445,13 +491,15 @@ type roundState struct {
 	// 원장을 읽을 수 없으므로(다른 호스트다) 이 값이 유일한 경로다.
 	filledShares float64
 
-	// reprices 는 quote.Reprice 판정 횟수다. 관측 전용이고 판단에 쓰이지 않는다.
-	reprices int64
-	// lastActionAt 은 마지막으로 주문을 **걸거나 옮긴** 시각이다.
+	// lastActionAt 은 이 회차에 주문 생성을 마지막으로 **시도한** 시각이다
+	// ([Runner.transmit] 이 찍는다).
 	//
-	// 이 값이 정체하면 프로세스는 멀쩡한데 호가창에 아무 일도 하지 않는
-	// 상태다 — mtime 하트비트가 절대 잡지 못하는 고장이고, 감시가 이것을
-	// 보려면 밖으로 나가야 한다.
+	// **정상 회차에서는 한 번만 움직인다.** 예전에는 재호가마다 갱신됐고 정체가
+	// 곧 고장이었지만, 지금은 걸고 나면 회차가 끝날 때까지 그대로다. 루프가
+	// 살아 있는지는 [Observation.LastLoopAt] 만이 답할 수 있다.
+	//
+	// 제로면 이 회차에 주문 요청이 한 번도 나가지 않았다는 뜻이다 — 자격 미달,
+	// 자본 부족, 체결 조회 실패가 그 경우다.
 	lastActionAt time.Time
 }
 
@@ -587,55 +635,6 @@ func (st *roundState) hasID(id string) bool {
 	return false
 }
 
-// ours 는 지금 호가창에 있을 수 있는 우리 물량 전부다. 취소 미확인 주문도
-// 포함한다 — 아직 책에 남아 있을 수 있고, 그렇다면 그것도 우리 자신이다.
-func (st *roundState) ours() []exposedOrder {
-	out := make([]exposedOrder, 0, len(st.pending)+1)
-	if st.live != nil {
-		out = append(out, exposedOrder{tick: st.live.tick, shares: st.live.shares})
-	}
-	for _, o := range st.pending {
-		out = append(out, exposedOrder{tick: o.tick, shares: o.shares})
-	}
-	return out
-}
-
-// excludeOurs 는 [ws.Book.BestBid] 에 넘길 제외 맵을 만든다.
-//
-// **수량은 반드시 [ws.Qty] 를 거친다.** 자연 단위 float 을 그대로 넣으면
-// 컴파일되지 않지만, 다른 배율의 int64 를 넣으면 조용히 틀린다 — 20주가
-// 0.00002주로 취급되어 우리 층이 그대로 남고, 봇은 자기 호가를 쫓는다.
-//
-// ok=false 는 **우리 주문을 호가창에서 뺄 수 없다**는 뜻이다(수량이 고정소수점
-// int64 를 넘는다). 그때 호출자는 그 호가창을 믿으면 안 된다 — 자기 자신을
-// 군중으로 착각한 채 판단하게 된다.
-func excludeOurs(orders []exposedOrder) (m map[int64]ws.Shares, ok bool) {
-	if len(orders) == 0 {
-		return nil, true
-	}
-	m = make(map[int64]ws.Shares, len(orders))
-	total := 0.0
-	for _, o := range orders {
-		if !representable(o.shares) {
-			return nil, false
-		}
-		total += o.shares
-		// 같은 틱에 여러 건이 겹치면 합이 넘칠 수 있다. 건별 검사만으로는
-		// 부족하다.
-		if !representable(total) {
-			return nil, false
-		}
-		m[o.tick] += ws.Qty(o.shares)
-	}
-	return m, true
-}
-
-// representable 은 주식 수가 [ws.Shares] 고정소수점으로 표현되는지 본다.
-func representable(shares float64) bool {
-	return !math.IsNaN(shares) && !math.IsInf(shares, 0) &&
-		shares >= 0 && shares <= maxExcludableShares
-}
-
 // ---------------------------------------------------------------------------
 // RunRound
 // ---------------------------------------------------------------------------
@@ -659,6 +658,13 @@ func (r *Runner) RunRound(ctx context.Context, rd live.Round, f live.Frozen, e r
 	if err != nil {
 		return err
 	}
+	// 지정가는 회차 시작에 한 번 정한다. 정밀도가 이 가격을 표현하지 못하면
+	// **주문이 하나도 나가기 전에** 여기서 멈춘다 — 근사한 가격으로 거는 것은
+	// 사용자가 정하지 않은 값에 베팅하는 것이다.
+	tick, err := limitTick(rd.Precision)
+	if err != nil {
+		return err
+	}
 	// 이 회차에 오더북을 어느 쪽으로 읽을지 여기서 한 번 정한다. 루프 안에서
 	// 매 바퀴 다시 정하면 방향이 바뀔 수 있는 자리가 생긴다 — 방향은 동결값이
 	// 정하는 것이고 회차 내내 하나여야 한다.
@@ -667,8 +673,8 @@ func (r *Runner) RunRound(ctx context.Context, rd live.Round, f live.Frozen, e r
 		return err
 	}
 
-	st := &roundState{dwell: &quote.Dwell{Need: r.Dwell}}
-	loopErr := r.loop(ctx, rd, f, e, tokenID, st, view)
+	st := &roundState{}
+	loopErr := r.loop(ctx, rd, f, e, tokenID, st, tick, view)
 	// 회차가 어떻게 끝났든 — 정상 종료든, 무장 해제든, ctx 취소든 — 살아 있는
 	// 주문은 반드시 거둔다. ctx 가 이미 죽었어도 취소는 나가야 하므로
 	// WithoutCancel 로 새 시한을 판다.
@@ -709,16 +715,17 @@ type Observation struct {
 	// FilledShares 는 체결 주수 누적이다. 명목(Exposure.FilledNotional)과
 	// 별개로 필요하다 — 이기면 주당 $1 이므로 배당은 주수로만 정해진다.
 	FilledShares float64
-	Reprices     int64
+	// LastActionAt 은 이 회차에 주문 생성을 마지막으로 시도한 시각이다.
+	// 정상 회차에서는 한 번만 움직이고, 제로면 요청이 한 번도 나가지 않았다.
 	LastActionAt time.Time
 	// LastLoopAt 은 이 관측이 만들어진 시각, 즉 **루프가 마지막으로 한 바퀴를
 	// 돈 시각**이다. 행동(LastActionAt)과 다르다.
 	//
-	// 두 값을 나누는 이유가 실측에서 나왔다. 한 번 걸고 군중이 안 움직이면
-	// quote 는 계속 DoNothing 을 돌려주고 LastActionAt 이 회차 내내 멈춘다 —
-	// 정상이다. 그것을 정체로 읽으면 회차마다 Crit 이 울리고, 늘 울리는
-	// 경보 옆의 진짜 Crit 은 묻힌다. 루프가 멎었는가는 **바퀴가 도는가**로만
-	// 답할 수 있고, 그 답은 이 값에만 있다.
+	// 두 값을 나누는 이유가 실측에서 나왔다. 예전에도 한 번 걸고 군중이 안
+	// 움직이면 LastActionAt 이 회차 내내 멈췄고 — 정상이었다 — 그것을 정체로
+	// 읽으면 회차마다 Crit 이 울렸다. 늘 울리는 경보 옆의 진짜 Crit 은 묻힌다.
+	// 회차당 한 번만 거는 지금은 그 정체가 **모든 회차의 정상 상태**다. 루프가
+	// 멎었는가는 **바퀴가 도는가**로만 답할 수 있고, 그 답은 이 값에만 있다.
 	//
 	// 회차마다 제로에서 시작한다(roundState 가 회차당 새로 만들어진다).
 	// 그래서 제로는 "멎었다" 가 아니라 "이 회차의 첫 바퀴가 아직" 이다.
@@ -737,7 +744,6 @@ func (r *Runner) observe(st *roundState) {
 		Exposure:     st.exposure(),
 		Unaccounted:  st.unknownNotional,
 		FilledShares: st.filledSharesKnown(),
-		Reprices:     st.reprices,
 		LastActionAt: st.lastActionAt,
 		LastLoopAt:   r.now(),
 	}
@@ -774,11 +780,9 @@ func (r *Runner) check(rd live.Round, f live.Frozen) error {
 	if r.StaleAfter <= 0 {
 		return fmt.Errorf("exec: StaleAfter 가 %s 다 — 제로값은 '문턱 없음'이 아니라 '설정 안 됨'이다", r.StaleAfter)
 	}
-	if r.Cooldown < 0 {
-		return fmt.Errorf("exec: Cooldown 이 음수다 (%s)", r.Cooldown)
-	}
-	// quote.Ceiling 은 이 범위 밖에서 패닉한다. 살아 있는 주문을 들기 전에
-	// 여기서 막아야 패닉이 일어날 자리가 없어진다.
+	// order.Full·order.Ceiling 은 이 범위 밖에서 패닉한다([limitTick] 이 둘 다
+	// 부른다). 살아 있는 주문을 들기 전에 여기서 막아야 패닉이 일어날 자리가
+	// 없어진다.
 	if rd.Precision < 1 || rd.Precision > ws.MaxPrecision {
 		return fmt.Errorf("exec: 회차 %s 의 precision 이 %d 다 (1..%d 여야 한다)", rd.Slug, rd.Precision, ws.MaxPrecision)
 	}
@@ -831,8 +835,22 @@ func tokenDirectionError(direction string) error {
 }
 
 // loop 는 회차가 끝날 때까지 도는 본체다.
-func (r *Runner) loop(ctx context.Context, rd live.Round, f live.Frozen, e risk.Equity, tokenID string, st *roundState, view bookView) error {
-	staleNs := r.StaleAfter.Nanoseconds()
+//
+// # 이 루프가 하는 일은 세 가지뿐이다
+//
+//	한 번 건다      회차 시작에 [LimitPrice] 로 한 건. 그 뒤로는 걸지 않는다.
+//	체결을 센다     원장에 적고 노출에 더한다.
+//	거둔다          회차가 끝나면 미체결을 전량 취소한다(cancelEverything).
+//
+// **주문을 옮기는 경로가 없다.** 재호가도, 취소 후 재주문도 없다. 걸린 주문은
+// 회차가 끝날 때까지 그 자리에 있다 — 그것이 이 전략의 전부다.
+func (r *Runner) loop(ctx context.Context, rd live.Round, f live.Frozen, e risk.Equity, tokenID string, st *roundState, tick order.Tick, view bookView) error {
+	// placed 는 "이 회차에서 주문을 낼 일이 끝났다"는 뜻이다. 성공했거나, 낼
+	// 수 없었거나, 재시도를 다 썼다.
+	placed := false
+	attempts := 0
+	var nextAttempt time.Time
+
 	for {
 		now := r.now()
 		if !now.Before(rd.EndsAt) {
@@ -853,62 +871,41 @@ func (r *Runner) loop(ctx context.Context, rd live.Round, f live.Frozen, e risk.
 			r.logf("회차 %s: 체결 조회 실패 — 이 주기에는 신규 주문을 내지 않는다: %v", rd.Slug, err)
 		}
 
-		// 2) 오더북에서 우리 주문을 뺀 최우선 호가를 읽는다.
+		// 2) 아직 안 걸었으면 건다. **이 블록이 회차당 한 번만 통과한다.**
 		//
-		// **exclude 를 우리 미체결 주문으로 채우는 것이 이 줄의 전부이자
-		// 요점이다.** 빠뜨리면 BestBid 가 우리 자신을 돌려주고, 목표가가
-		// 우리 호가와 같아져 "동일가 유지"로 영원히 굳는다 — 군중이 내려가도
-		// 따라 내려오지 못한다. quote 테스트로는 절대 잡히지 않는다.
+		// 호가창은 보지 않는다 — 가격이 상수라 볼 이유가 없다. 낡은 호가창을
+		// 이유로 미루면 근거 없이 회차의 앞부분을 버리는 일이고, 큐 위치는
+		// 앞설수록 좋다.
+		if !placed && fillsOK && !now.Before(nextAttempt) {
+			attempts++
+			done, err := r.place(ctx, rd, f, tokenID, e, st, tick, view, now)
+			if err != nil {
+				return err
+			}
+			switch {
+			case done:
+				placed = true
+			case attempts >= maxPlaceAttempts:
+				// 전부 "아무것도 나가지 않았다"가 확정된 실패였다. 더 두드려도
+				// 예산만 쓴다.
+				placed = true
+				r.logf("회차 %s: 주문 생성이 %d회 연속 실패했다(전부 재시도 안전) — 이 회차는 걸지 않는다", rd.Slug, attempts)
+			default:
+				nextAttempt = now.Add(r.rejectBackoff())
+			}
+		}
+
+		// 3) 취소를 확인할 때까지 물고 늘어진다. 취소 재시도는 멱등이라 안전하다.
 		//
-		// **view 를 거치는 것이 두 번째 요점이다.** 오더북은 마켓당 한 벌이고
-		// Up 기준이다 — Down 회차에 그대로 읽으면 남의 책을 보고 가격을
-		// 정하게 되고, 실제로 관통해 테이커 수수료를 물었다(book.go 참고).
-		ex, exOK := excludeOurs(view.ourTicks(st.ours()))
-		// 우리 주문을 뺄 수 없으면 그 호가창은 우리 자신이 섞인 값이다.
-		// 오래된 호가창과 똑같이 다룬다 — 믿을 수 없는 책으로는 새로 걸지 않고
-		// 걸린 것은 거둔다.
-		untrusted := !exOK
-		if untrusted {
-			r.logf("회차 %s: 우리 주문을 호가창에서 뺄 수 없다(수량이 고정소수점 범위를 넘는다) — 신규 중단·기존 취소", rd.Slug)
-		}
-		stale := r.Book.Stale(r.monoNs(), staleNs) || untrusted
-
-		// 3) 판단은 quote 가 한다. 여기서는 아무것도 비교하지 않는다.
-		qb := view.quoteBook(r.Book, ex)
-		qo := quote.Open{}
-		if st.live != nil {
-			qo = quote.Open{Tick: st.live.tick, Placed: st.live.placed, Live: true}
-		}
-		d := quote.Decide(qb, qo, now, r.Cooldown, stale, st.dwell)
-
-		switch d.Action {
-		case quote.Place:
-			if fillsOK {
-				if err := r.place(ctx, rd, f, tokenID, e, st, d, now); err != nil {
-					return err
-				}
-				st.lastActionAt = now
-			}
-		case quote.Reprice, quote.CancelOnly:
-			// 취소만 한다. 재주문은 거래소가 취소를 확인해 준 다음 바퀴에
-			// 일어난다 — 확인 전에 다시 걸면 그 순간 노출이 두 배다.
-			r.beginCancel(st, now, d.Why)
-			if d.Action == quote.Reprice {
-				st.reprices++
-				st.lastActionAt = now
-			}
-		case quote.DoNothing:
-		}
-
-		// 4) 취소를 확인할 때까지 물고 늘어진다. 취소 재시도는 멱등이라 안전하다.
+		//    회차 중에 취소가 생기는 경로는 없지만(옮기지 않으므로) 이 호출은
+		//    남겨 둔다 — 생성 결과 불명으로 곧바로 취소 대기에 들어간 주문이
+		//    있을 수 있고, 그것을 회차 끝까지 방치하면 잊힌 매수 주문이 된다.
 		r.sweepPending(ctx, st, now)
-		// 4-1) 취소가 확인된 주문에 "얼마나 찼나"를 묻는다. **이것이 노출을
-		//      푸는 유일한 자리다.** 이 호출이 빠지면 confirming 이 계속 쌓여
-		//      회차가 한 번 걸고 멈춘다 — 예전처럼 두 배로 거는 것보다는
-		//      낫지만, 그것도 고장이다.
+		// 3-1) 취소가 확인된 주문에 "얼마나 찼나"를 묻는다. **이것이 노출을
+		//      푸는 유일한 자리다.**
 		r.resolveConfirming(ctx, st, r.now())
 
-		// 5) 바깥에 우리 상태를 복사해 준다. 관측 전용이다 — 이 호출의 결과가
+		// 4) 바깥에 우리 상태를 복사해 준다. 관측 전용이다 — 이 호출의 결과가
 		//    회차 진행에 영향을 주는 경로는 없다.
 		r.observe(st)
 
@@ -918,31 +915,52 @@ func (r *Runner) loop(ctx context.Context, rd live.Round, f live.Frozen, e risk.
 	}
 }
 
-// place 는 신규 주문 한 건이다. 크기는 risk 가 정한다.
-func (r *Runner) place(ctx context.Context, rd live.Round, f live.Frozen, tokenID string, e risk.Equity, st *roundState, d quote.Decision, now time.Time) error {
+// place 는 이 회차의 유일한 주문이다. 가격은 [LimitPrice], 크기는 risk 가 정한다.
+//
+// done=true 는 **더 시도하지 말라**는 뜻이다 — 주문이 존재하거나, 존재할 수
+// 있거나, 이 회차에서는 낼 수 없다. done=false 는 아무것도 나가지 않았음이
+// 확정된 경우뿐이고, 그때만 호출자가 다시 부른다.
+func (r *Runner) place(ctx context.Context, rd live.Round, f live.Frozen, tokenID string, e risk.Equity, st *roundState, tick order.Tick, view bookView, now time.Time) (done bool, err error) {
 	remaining := risk.Remaining(e, st.exposure())
-	tick := order.NewTick(d.Tick, rd.Precision)
 	shares := risk.Shares(remaining, tick.Float())
 	if shares <= 0 {
-		r.logf("회차 %s: 잔여 %.4f USD 로는 %v 에 유효한 주문을 만들 수 없다 — 건너뛴다", rd.Slug, remaining, tick.Float())
-		return nil
-	}
-	// 호가창에서 다시 뺄 수 없는 크기의 주문은 내지 않는다. 내고 나면 그
-	// 순간부터 우리는 자기 호가를 군중으로 읽는다 — 조용히.
-	if !representable(shares) {
-		r.logf("회차 %s: %.0f주는 호가창 제외 수량으로 표현할 수 없다(상한 %.0f) — 주문하지 않는다", rd.Slug, shares, maxExcludableShares)
-		return nil
+		// 자본은 회차 시작에 동결된 값이고 노출은 아직 비어 있다. 다시 물어도
+		// 같은 답이 나오므로 이 회차는 여기서 끝이다.
+		r.logf("회차 %s: 잔여 %.4f USD 로는 %v 에 유효한 주문을 만들 수 없다 — 이 회차는 걸지 않는다", rd.Slug, remaining, tick.Float())
+		return true, nil
 	}
 	req := Request{Round: rd, Outcome: f.Direction, TokenID: tokenID, Tick: tick, Shares: shares}
-	r.logf("회차 %s: %s → %s %.4f주 @ %v (명목 %.4f, 잔여 %.4f)",
-		rd.Slug, d.Why, f.Direction, shares, tick.Float(), req.Notional(), remaining)
+	r.logf("회차 %s: %s %.4f주 @ %v (명목 %.4f, 잔여 %.4f) — %s",
+		rd.Slug, f.Direction, shares, tick.Float(), req.Notional(), remaining, r.marketNote(view))
 	return r.transmit(ctx, st, req, now)
+}
+
+// marketNote 는 주문을 낸 순간의 시장 모습이다.
+//
+// **로그 문자열 하나로만 나간다.** 이 값을 읽어 가격이나 수량을 바꾸는 경로는
+// 없고, 생기면 그것은 전략 변경이다(book.go 참고). 그럼에도 남기는 이유:
+// "0.47 이 그때 좋은 가격이었나" 를 사후에 답할 근거가 이것뿐이다 — 특히
+// 매도호가가 0.47 이하였다면 우리는 관통해서 테이커 수수료를 문 것이고,
+// 그 사실은 여기 아니면 어디에도 남지 않는다.
+func (r *Runner) marketNote(view bookView) string {
+	s := view.sides(r.Book)
+	note := fmt.Sprintf("시장 매수 %s / 매도 %s", view.label(s.BestBid, s.HasBid), view.label(s.BestAsk, s.HasAsk))
+	if r.Book.Stale(r.monoNs(), r.StaleAfter.Nanoseconds()) {
+		note += fmt.Sprintf(" (호가창이 %s 넘게 낡았다 — 이 값은 믿을 수 없다)", r.StaleAfter)
+	}
+	return note
 }
 
 // transmit 은 이 패키지에서 [Orders.Create] 를 부르는 **유일한** 자리다.
 // 주문이 나가는 부수효과를 한 곳에 모아 두면 실패 분류도 한 곳에서 끝난다.
-func (r *Runner) transmit(ctx context.Context, st *roundState, req Request, now time.Time) error {
+//
+// done 의 뜻은 [Runner.place] 와 같다.
+func (r *Runner) transmit(ctx context.Context, st *roundState, req Request, now time.Time) (done bool, err error) {
 	res, err := r.Orders.Create(ctx, req)
+	// **요청이 나간 순간이 행동이다.** 결과가 무엇이든 우리는 호가창에 손을
+	// 댔다. 여기가 아니라 "성공했을 때" 만 찍으면, 낼 수 없어서 아무것도 안 한
+	// 회차와 냈는데 결과를 모르는 회차가 밖에서 똑같아 보인다.
+	st.lastActionAt = now
 	if err == nil && res.ID == "" {
 		// 성공이라는데 식별자가 없다. 이 주문은 취소할 수 없다.
 		err = errors.New("주문 생성 응답에 식별자가 없다")
@@ -957,10 +975,11 @@ func (r *Runner) transmit(ctx context.Context, st *roundState, req Request, now 
 	}
 	if err != nil {
 		if safeToRetry(err) {
-			// 주문은 존재하지 않는다. 노출에 아무것도 더하지 않고, 다음
-			// 바퀴에 같은 판단이 서면 다시 낸다.
+			// 주문은 존재하지 않는다. 노출에 아무것도 더하지 않고, 호출자가
+			// 다시 부를 수 있게 done=false 로 돌아간다 — 그래도 호가창에 우리
+			// 주문이 없으므로 "회차당 한 건" 은 깨지지 않는다.
 			r.logf("주문 생성 실패(재시도 안전): %v", err)
-			return nil
+			return false, nil
 		}
 		// **보냈을 수 있다.** 다시 보내면 둘 들어간다.
 		o := &openOrder{
@@ -972,11 +991,11 @@ func (r *Runner) transmit(ctx context.Context, st *roundState, req Request, now 
 			// 식별자가 있으면 취소는 시도할 수 있다.
 			st.pending = append(st.pending, o)
 			r.logf("주문 결과 불명 — 재전송하지 않고 취소를 시도한다 (id=%s): %v", o.id, err)
-			return nil
+			return true, nil
 		}
 		st.unknownNotional += o.notional
 		r.logf("주문 결과 불명이고 식별자도 없다 — 명목 %.4f 를 회차 끝까지 노출에 남긴다: %v", o.notional, err)
-		return nil
+		return true, nil
 	}
 
 	st.live = &openOrder{
@@ -985,7 +1004,7 @@ func (r *Runner) transmit(ctx context.Context, st *roundState, req Request, now 
 		retryAt: retryAtFrom(res, now), lockUnknown: res.RemovalLockUnknown,
 		filledBefore: st.filledBaseline(),
 	}
-	return nil
+	return true, nil
 }
 
 // retryAtFrom 은 이 주문에 취소를 시도할 수 있는 가장 이른 시각이다.

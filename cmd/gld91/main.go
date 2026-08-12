@@ -1,10 +1,13 @@
-// Command gld91 은 predict.fun BTC 5분 Up/Down 시장의 마켓메이킹 봇이다.
+// Command gld91 은 predict.fun BTC 5분 Up/Down 시장의 지정가 매수 봇이다.
 //
 // # 이 바이너리가 하는 일
 //
 //	설정을 읽고 → 자가 점검 다섯을 하고 → 무장 여부를 정하고 → 회차를 돈다.
 //
-// 판단은 전부 다른 패키지에 있다. 목표가는 internal/quote, 크기는
+// 회차마다 하는 일은 하나다: 시작에 동결된 방향으로 exec.LimitPrice 에
+// 매수호가를 **한 번** 걸고, 회차가 끝나면 미체결을 거둔다. 옮기지 않는다.
+//
+// 판단은 전부 다른 패키지에 있다. 가격은 exec.LimitPrice 상수, 크기는
 // internal/risk, 예측은 internal/live, 집행은 internal/exec 다. 여기 있는
 // 것은 배선과 게이트뿐이다.
 //
@@ -251,8 +254,6 @@ func run(cfg *Config) error {
 		Orders:     sender,
 		Fills:      fills,
 		Ledger:     l,
-		Cooldown:   cfg.Cooldown,
-		Dwell:      cfg.Dwell,
 		StaleAfter: cfg.StaleAfter,
 		Poll:       cfg.Poll,
 		Log:        logf,
@@ -588,9 +589,9 @@ func loop(ctx context.Context, cfg *Config, rc *rest.Client, runner *exec.Runner
 			logf("회차 %s 실패: %v", t.round.Slug, err)
 			if exec.IsDisarm(err) {
 				halted = true
-				logf("🛑 거래 중단 — 새 회차를 잡지 않는다. 프로세스는 살려 둔다"+
+				logf("🛑 거래 중단 — 새 회차를 잡지 않는다. 프로세스는 살려 둔다" +
 					" (감시가 계속 보이게, 그리고 재시작이 이 상태를 지우지 못하게).")
-				logf("   사람이 할 일: 거래소의 열린 주문을 확인하고, 원장과 대조한 뒤"+
+				logf("   사람이 할 일: 거래소의 열린 주문을 확인하고, 원장과 대조한 뒤" +
 					" LIVE_ARM 을 다시 설정해 재시작한다.")
 			}
 		}

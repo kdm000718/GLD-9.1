@@ -169,13 +169,13 @@ func TestSnapshotCarriesLoopAndAck(t *testing.T) {
 	now := time.Unix(1786000000, 0).UTC()
 	in := snapshotInput{
 		Version: "gld91 abc", Armed: true, Acked: beat.CmdShutdown,
-		Obs:           exec.Observation{Reprices: 42, LastActionAt: now, LastLoopAt: now.Add(3 * time.Second)},
+		Obs:           exec.Observation{LastActionAt: now, LastLoopAt: now.Add(3 * time.Second)},
 		WSLastDataAt:  now.Add(-time.Second),
 		RateRemaining: 118,
 		Skips:         map[beat.SkipReason]int{beat.SkipConfBelow: 7},
 	}
 	got := buildSnapshot(in)
-	if got.Loop.Reprices != 42 || !got.Loop.LastActionAt.Equal(now) {
+	if !got.Loop.LastActionAt.Equal(now) {
 		t.Errorf("loop = %+v", got.Loop)
 	}
 	// **둘을 다른 값으로 넣고 각각 확인한다.** 같은 값으로 시험하면 배선이
