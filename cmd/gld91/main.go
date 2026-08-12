@@ -283,7 +283,15 @@ func run(cfg *Config) error {
 		wire.Run(ctx)
 	}
 
-	return loop(ctx, cfg, rc, runner, predictor, equitySrc, wire)
+	// 회수 배선. 꺼져 있으면 nil 이고 모든 호출이 아무것도 하지 않는다 —
+	// 회수가 안 된다고 거래를 막으면 안 된다(claim.go).
+	//
+	// **원장을 봇과 공유한다.** exec 는 체결을, 회수는 정산을 같은 파일에
+	// 적는다. ledger.Ledger 가 뮤텍스로 쓰기를 직렬화하므로 안전하고, 나눠
+	// 적으면 한 회차의 지출과 수입이 두 파일에 흩어진다.
+	claimer := newAutoClaim(cfg, secrets.Account, signer, l, os.Getenv, logf)
+
+	return loop(ctx, cfg, rc, runner, predictor, equitySrc, wire, claimer)
 }
 
 // armLabel 은 LIVE_ARM 을 로그에 남기되 **값을 그대로 찍지 않는다.**
@@ -492,7 +500,7 @@ func (rt *router) pollRounds(ctx context.Context, rc *rest.Client, wsc *ws.Clien
 
 // loop 는 회차를 하나씩 돈다.
 func loop(ctx context.Context, cfg *Config, rc *rest.Client, runner *exec.Runner,
-	predictor *live.Predictor, equitySrc *live.EquitySource, wire *beatWire) error {
+	predictor *live.Predictor, equitySrc *live.EquitySource, wire *beatWire, claimer *autoClaim) error {
 
 	if cfg.Minutes > 0 {
 		var cancel context.CancelFunc
@@ -522,16 +530,21 @@ func loop(ctx context.Context, cfg *Config, rc *rest.Client, runner *exec.Runner
 	// 호가가 끊긴 채 도는 봇을 아무도 잡지 못한다.
 	wire.SetProbes(loopProbes{WSLastDataAt: wsc.LastDataAt})
 
-	// 배경 고루틴 둘은 ctx 가 끝나야 멈춘다. **정리 순서가 중요하다** —
-	// defer 는 LIFO 라 아래 두 줄은 "cancelAll 먼저, wg.Wait 나중" 으로 돈다.
-	// 순서가 뒤집히면 ctx 가 살아 있는 채로 wg.Wait 에 들어가 영원히 멈춘다
+	// 배경 고루틴들은 ctx 가 끝나야 멈춘다. **정리 순서가 중요하다** —
+	// defer 는 LIFO 라 아래 세 줄은 "cancelAll → claimer.wait → wg.Wait" 순으로
+	// 돈다. 순서가 뒤집히면 ctx 가 살아 있는 채로 대기에 들어가 영원히 멈춘다
 	// (에러로 빠져나가는 경로가 나중에 하나라도 생기면 그 즉시 교착이다).
+	//
+	// **회수 대기가 원장 Close 보다 먼저여야 한다.** run() 이 원장을 defer 로
+	// 닫으므로 이 함수가 돌아가기 전에 회수 바퀴가 끝나 있어야 하고, 아니면
+	// 돈은 돌아왔는데 정산 행만 사라진다.
 	runCtx, cancelAll := context.WithCancel(ctx)
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() { defer wg.Done(); _ = wsc.Run(runCtx) }()
 	go func() { defer wg.Done(); rt.pollRounds(runCtx, rc, wsc, cfg) }()
 	defer wg.Wait()
+	defer claimer.wait()
 	defer cancelAll()
 
 	done := map[string]bool{}
@@ -595,6 +608,12 @@ func loop(ctx context.Context, cfg *Config, rc *rest.Client, runner *exec.Runner
 					" LIVE_ARM 을 다시 설정해 재시작한다.")
 			}
 		}
+		// **회차가 어떻게 끝났든 회수 한 바퀴를 띄운다.** 배경에서 돌고 곧바로
+		// 돌아오므로 다음 회차의 첫 호가를 늦추지 않는다(claim.go).
+		//
+		// 회차의 성패와 묶지 않는 이유: 지금 회수하는 것은 **지난** 회차들이
+		// 남긴 정산 포지션이고, 이번 회차가 어떻게 끝났는지와 아무 상관이 없다.
+		claimer.after(runCtx, t.round.Slug)
 	}
 }
 

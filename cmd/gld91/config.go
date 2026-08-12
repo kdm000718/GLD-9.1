@@ -132,6 +132,14 @@ type Config struct {
 	// IncludePositions 는 미정산 포지션 취득원가를 equity 에 더할지다.
 	IncludePositions bool
 
+	// AutoClaim 은 회차 종료마다 정산된 포지션을 회수할지다.
+	//
+	// **켜져 있어도 전송은 `CLAIM_ARM` 이 따로 연다**(claim.go). 이 플래그는
+	// "회수 경로를 아예 돌리지 않는다" 를 위한 것이고, 기본값이 true 인 이유는
+	// 회수하지 않은 포지션이 쌓이면 다음 회차의 포지션 조회를 어지럽히기
+	// 때문이다.
+	AutoClaim bool
+
 	// DryRunEquityUSDT 는 **DRY-RUN 전용** 가짜 가용 잔고다.
 	//
 	// 계정에 자금이 없으면 cap 이 0 이라 호가·사이징·서명 경로가 한 번도
@@ -167,6 +175,8 @@ func Flags(fs *flag.FlagSet) *Config {
 	fs.Float64Var(&c.Minutes, "minutes", 0, "실행 시간 상한(분). 0 이면 무제한")
 	fs.BoolVar(&c.IncludePositions, "include-positions", false,
 		"미정산 포지션 취득원가를 equity 에 더한다 (기본 false = 보수적)")
+	fs.BoolVar(&c.AutoClaim, "auto-claim", true,
+		"회차 종료마다 정산된 포지션을 회수한다. 전송은 CLAIM_ARM 이 따로 연다")
 	fs.Float64Var(&c.DryRunEquityUSDT, "dry-run-equity", 0,
 		"DRY-RUN 전용 가짜 가용 잔고(USDT). 무장 상태에서 0 이 아니면 기동 실패")
 	return c
