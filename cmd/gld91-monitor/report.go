@@ -71,6 +71,10 @@ type tally struct {
 	Mismatch     int
 	MismatchOf   int
 	Pending      int
+	// Since 는 이력에서 가장 오래된 회차의 종료 시각이다. 누적이 **언제부터**
+	// 인지를 말하는 값이다 — 이력이 디스크에 남게 된 뒤로는 "모니터 기동
+	// 이후" 가 더 이상 참이 아니다.
+	Since time.Time
 }
 
 // AvgEntry 는 평균 진입가(주당)다. 주수가 0 이면 계산하지 않는다 — 0/0 은
@@ -121,6 +125,9 @@ func accumulate(ps []participation) tally {
 	var t tally
 	for _, p := range ps {
 		t.Participated++
+		if !p.EndsAt.IsZero() && (t.Since.IsZero() || p.EndsAt.Before(t.Since)) {
+			t.Since = p.EndsAt
+		}
 		t.Cost += p.Cost
 		t.Shares += p.Shares
 		if p.ChainlinkUp != nil && !p.PriceMissing {

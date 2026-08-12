@@ -80,9 +80,9 @@ func routeCommand(text string, s *state, now time.Time) (reply string, handled b
 
 // formatStatus 는 마지막 스냅샷의 요약이다.
 //
-// **정산·손익은 아직 없다(Task 10).** 봇은 자기 손익을 모르고(exec 에 정산
-// 조회 경로가 없다) 모니터의 정산 관측이 아직 배선되지 않았다. 없는 것을
-// 0 으로 찍지 않고 없다고 말한다 — 0 은 "손익 없음" 으로 읽힌다.
+// 정산·손익은 모니터가 관측해 채운다(settle.go). 봇은 자기 실현손익을 모른다 —
+// 정산 결과는 거래소에만 있고 봇에 조회 경로가 없다. 없는 것을 0 으로 찍지 않고
+// 없다고 말하는 원칙은 그대로다: 표본이 0 이면 비율을 만들지 않는다.
 func formatStatus(s *state, now time.Time) string {
 	snap, last := s.Latest()
 	if snap == nil {
@@ -135,12 +135,18 @@ func formatStatus(s *state, now time.Time) string {
 // **표본이 0 이면 비율을 만들지 않는다.** 0/0 은 NaN 이고, NaN 이 리포트에 실리면
 // 사람은 그것을 0% 로 읽는다 — 이 파일이 일손실 한도 줄을 뺀 것과 같은 원칙이다.
 //
-// **「기동 이후」를 반드시 적는다.** 이력은 메모리에만 있고 재기동하면 0 부터 다시
-// 센다(report.go 문서). 그 사실을 빼면 재기동 직후의 "누적 참여 1회차" 가 전체
-// 기간의 값으로 읽히고, 그 오해는 승률이 낮을 때 가장 비싸다.
+// **누적이 언제부터인지를 적는다.** 구간을 빼면 "누적 참여 1회차" 가 전체 기간의
+// 값으로 읽히고, 그 오해는 승률이 낮을 때 가장 비싸다. 이력이 디스크에 남게 된
+// 뒤로는 "모니터 기동 이후" 라고 쓸 수 없다 — 재기동해도 이어지므로 그 말이
+// 거짓이 된다(store.go). 그래서 이력에 실제로 들어 있는 가장 오래된 회차를
+// 그대로 적는다. 시각은 UTC 다. 봇의 원장·모니터 로그가 전부 UTC 이므로
+// 여기만 현지시로 찍으면 대조할 때 다섯 시간을 손으로 빼야 한다.
 func formatCumulative(t tally) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "📈 누적 참여 %d회차 (모니터 기동 이후)", t.Participated)
+	fmt.Fprintf(&b, "📈 누적 참여 %d회차", t.Participated)
+	if !t.Since.IsZero() {
+		fmt.Fprintf(&b, " (%s UTC 부터)", t.Since.UTC().Format("01-02 15:04"))
+	}
 	if t.Settled > 0 {
 		fmt.Fprintf(&b, "\n   적중 %d/%d = %.1f%% · 대기 %d · 손익 %+.4f USDT",
 			t.Hits, t.Settled, 100*float64(t.Hits)/float64(t.Settled), t.Pending, t.PnL)

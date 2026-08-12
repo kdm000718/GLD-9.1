@@ -336,10 +336,14 @@ func playRounds(t *testing.T, st *state, n, settled, hits int) {
 	t.Helper()
 	var ss []settlement
 	for i := 0; i < n; i++ {
-		slug := fmt.Sprintf("btc-updown-5m-%d", 1786500000+i*300)
+		start := int64(1786500000 + i*300)
+		slug := fmt.Sprintf("btc-updown-5m-%d", start)
 		s := healthySnapshot()
 		s.Seq, s.BootID = uint64(i+1), "a"
 		s.Round.Slug = slug
+		// **종료 시각을 슬러그와 맞춘다.** healthySnapshot 은 EndsAt 을 "지금
+		// +2분" 으로 두는데, 그러면 누적 구간의 시작이 회차와 무관한 값이 된다.
+		s.Round.EndsAt = time.Unix(start+300, 0).UTC()
 		s.Round.Outcome = "Up"
 		s.Exposure.Filled, s.Exposure.FilledShares = 3.29, 7
 		if code, _ := post(t, st, *s); code != 200 {
@@ -415,15 +419,21 @@ func TestStatusShowsZeroParticipation(t *testing.T) {
 	}
 }
 
-// **누적은 모니터 기동 이후다.** 이력은 메모리에만 있고(report.go 문서),
-// 재기동하면 0 부터 다시 센다. 그 사실을 적지 않으면 재기동 직후의 "누적
-// 참여 1회차" 가 전체 기간의 값으로 읽힌다.
-func TestStatusSaysCumulativeIsSinceMonitorStart(t *testing.T) {
+// **누적이 언제부터인지 적는다.** 구간을 빼면 "누적 참여 1회차" 가 전체
+// 기간의 값으로 읽힌다.
+//
+// 「모니터 기동 이후」라고 쓰면 안 된다 — 이력이 디스크에 남게 된 뒤로는
+// 재기동해도 이어지므로 그 말이 거짓이다(store.go).
+func TestStatusSaysWhenCumulativeStarts(t *testing.T) {
 	st := newTestState()
 	playRounds(t, st, 2, 1, 1)
 
 	reply, _ := routeCommand("/status", st, at())
-	if !strings.Contains(reply, "기동 이후") {
-		t.Errorf("누적의 기준 구간이 적히지 않았다:\n%s", reply)
+	// playRounds 의 첫 회차는 1786500000 (2026-08-12 02:00Z), 종료는 +300초다.
+	if !strings.Contains(reply, "08-12 02:05 UTC 부터") {
+		t.Errorf("누적의 시작 시각이 적히지 않았다:\n%s", reply)
+	}
+	if strings.Contains(reply, "기동 이후") {
+		t.Errorf("이력이 재기동을 넘어 남는데 「기동 이후」라고 말한다:\n%s", reply)
 	}
 }
