@@ -112,10 +112,34 @@ func formatStatus(s *state, now time.Time) string {
 	fmt.Fprintf(&b, "🛡 %s · 예산 %d/240 · 재호가 %d\n",
 		armedLabel(snap.Armed), snap.Loop.RateLimitRemaining, snap.Loop.Reprices)
 	fmt.Fprintf(&b, "💓 마지막 beat %.0f초 전 (seq %d, %s)\n", now.Sub(last).Seconds(), snap.Seq, snap.Version)
+	b.WriteString(formatCumulative(accumulate(s.Participations())))
 	if c := s.Pending(); c != beat.CmdNone && c != "" {
-		fmt.Fprintf(&b, "📮 걸린 명령: %s (봇 수신 %v)\n", c, s.PendingAcked())
+		fmt.Fprintf(&b, "\n📮 걸린 명령: %s (봇 수신 %v)", c, s.PendingAcked())
 	}
-	b.WriteString("ℹ️ 정산·손익 집계는 아직 배선되지 않았습니다 (P6 Task 10).")
+	return b.String()
+}
+
+// formatCumulative 는 누적 참여 회차와 누적 승률 한 줄이다.
+//
+// **분모는 정산 건수다. 참여 건수가 아니다.** 참여로 나누면 아직 결과를 모르는
+// 회차가 전부 패배로 계산되어 승률이 조용히 낮아진다 — 회차가 5분이라 언제나 몇
+// 건은 미정산이므로 그 실수는 상시 켜져 있게 된다(accumulate 문서와 같은 이유).
+//
+// **표본이 0 이면 비율을 만들지 않는다.** 0/0 은 NaN 이고, NaN 이 리포트에 실리면
+// 사람은 그것을 0% 로 읽는다 — 이 파일이 일손실 한도 줄을 뺀 것과 같은 원칙이다.
+//
+// **「기동 이후」를 반드시 적는다.** 이력은 메모리에만 있고 재기동하면 0 부터 다시
+// 센다(report.go 문서). 그 사실을 빼면 재기동 직후의 "누적 참여 1회차" 가 전체
+// 기간의 값으로 읽히고, 그 오해는 승률이 낮을 때 가장 비싸다.
+func formatCumulative(t tally) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "📈 누적 참여 %d회차 (모니터 기동 이후)", t.Participated)
+	if t.Settled > 0 {
+		fmt.Fprintf(&b, "\n   적중 %d/%d = %.1f%% · 대기 %d · 손익 %+.4f USDT",
+			t.Hits, t.Settled, 100*float64(t.Hits)/float64(t.Settled), t.Pending, t.PnL)
+	} else if t.Participated > 0 {
+		fmt.Fprintf(&b, "\n   아직 정산된 회차가 없습니다 (대기 %d)", t.Pending)
+	}
 	return b.String()
 }
 

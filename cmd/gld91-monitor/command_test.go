@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -191,13 +192,19 @@ func TestCommandsBeforeFirstBeat(t *testing.T) {
 	}
 }
 
-// 손익 집계가 없다는 것을 숨기지 않는다. 없는 것을 0 으로 찍으면 "손익 없음"
-// 으로 읽히고, 그건 조용한 오답이다.
-func TestStatusAdmitsMissingSettlement(t *testing.T) {
+// **「정산·손익 집계는 아직 배선되지 않았습니다」는 되살아나면 안 된다.**
+//
+// 그 문장은 settle.go 와 **같은 커밋**(496cb12)에 들어왔다 — 배선이 끝난 시점에
+// 이미 거짓이었다. 운영에서도 모니터가 `정산 조회: … 반영 1건` 을 찍는다.
+// 배선된 것을 미배선이라 적으면 사람은 화면의 승률을 자리표시자로 읽고 무시한다.
+//
+// 원래의 원칙(없는 것을 0 으로 찍지 않는다)은 버리지 않았다. 표본이 0 일 때
+// 비율을 만들지 않는 것으로 지킨다 — TestStatusWinRateAbsentWhenNothingSettled.
+func TestStatusDoesNotClaimSettlementIsUnwired(t *testing.T) {
 	st := stateWith(t, nil)
 	reply, _ := routeCommand("/status", st, at())
-	if !strings.Contains(reply, "아직 배선되지 않") {
-		t.Errorf("정산 미배선을 숨긴다:\n%s", reply)
+	if strings.Contains(reply, "아직 배선되지 않") {
+		t.Errorf("배선이 끝난 정산을 미배선이라고 말한다:\n%s", reply)
 	}
 }
 
@@ -316,5 +323,107 @@ func TestMentionStripDoesNotInventCommands(t *testing.T) {
 		if _, handled := routeCommand(text, st, at()); handled {
 			t.Errorf("%q 가 명령으로 처리됐다", text)
 		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 누적 참여·승률
+// ---------------------------------------------------------------------------
+
+// playRounds 는 회차 n 개를 걸고 그중 앞의 settled 개를 정산시킨다.
+// hits 개가 적중이다. 슬러그는 5분 격자 위에 있어야 한다(rest.ParseSlugStart).
+func playRounds(t *testing.T, st *state, n, settled, hits int) {
+	t.Helper()
+	var ss []settlement
+	for i := 0; i < n; i++ {
+		slug := fmt.Sprintf("btc-updown-5m-%d", 1786500000+i*300)
+		s := healthySnapshot()
+		s.Seq, s.BootID = uint64(i+1), "a"
+		s.Round.Slug = slug
+		s.Round.Outcome = "Up"
+		s.Exposure.Filled, s.Exposure.FilledShares = 3.29, 7
+		if code, _ := post(t, st, *s); code != 200 {
+			t.Fatalf("%s 주입 실패: %d", slug, code)
+		}
+		if i < settled {
+			won := "Down" // 빗나감
+			if i < hits {
+				won = "Up"
+			}
+			ss = append(ss, settlement{Slug: slug, WonName: won, SettledAt: at()})
+		}
+	}
+	if got := st.ApplySettlements(ss); got != settled {
+		t.Fatalf("반영된 정산 %d건, want %d", got, settled)
+	}
+}
+
+// /status 는 누적 참여 회차와 누적 승률을 싣는다.
+func TestStatusShowsCumulativeParticipationAndWinRate(t *testing.T) {
+	st := newTestState()
+	playRounds(t, st, 5, 4, 3)
+
+	reply, handled := routeCommand("/status", st, at())
+	if !handled {
+		t.Fatal("/status 가 처리되지 않았다")
+	}
+	for _, want := range []string{"누적 참여 5회차", "적중 3/4", "75.0%"} {
+		if !strings.Contains(reply, want) {
+			t.Errorf("%q 가 없다:\n%s", want, reply)
+		}
+	}
+}
+
+// **미정산 회차는 승률 분모에 들어가지 않는다.** 들어가면 아직 결과를 모르는
+// 회차가 전부 패배로 계산되어 승률이 조용히 낮아진다 — 5분 회차라 언제나 몇
+// 건은 미정산이므로 이 실수는 상시 켜져 있게 된다.
+func TestStatusWinRateDenominatorIsSettledNotParticipated(t *testing.T) {
+	st := newTestState()
+	playRounds(t, st, 10, 2, 1)
+
+	reply, _ := routeCommand("/status", st, at())
+	if !strings.Contains(reply, "적중 1/2") {
+		t.Errorf("분모가 정산 건수가 아니다:\n%s", reply)
+	}
+	if strings.Contains(reply, "/10") || strings.Contains(reply, "10.0%") {
+		t.Errorf("참여 건수가 분모로 쓰였다:\n%s", reply)
+	}
+}
+
+// 정산된 회차가 하나도 없으면 비율을 계산하지 않는다. 0/0 은 NaN 이고,
+// NaN 이 실리면 사람은 그것을 0% 로 읽는다.
+func TestStatusWinRateAbsentWhenNothingSettled(t *testing.T) {
+	st := newTestState()
+	playRounds(t, st, 3, 0, 0)
+
+	reply, _ := routeCommand("/status", st, at())
+	if !strings.Contains(reply, "누적 참여 3회차") {
+		t.Errorf("참여 회차가 없다:\n%s", reply)
+	}
+	if strings.Contains(strings.ToLower(reply), "nan") || strings.Contains(reply, "적중 0/0") {
+		t.Errorf("표본 0 에서 비율을 계산했다:\n%s", reply)
+	}
+}
+
+// 한 건도 걸지 않았어도 /status 는 그 사실을 말한다 — 줄이 통째로 사라지면
+// "집계가 배선되지 않은 것" 과 "아직 안 건 것" 이 구분되지 않는다.
+func TestStatusShowsZeroParticipation(t *testing.T) {
+	st := stateWith(t, nil) // healthySnapshot 은 Slug 가 비어 이력에 남지 않는다
+	reply, _ := routeCommand("/status", st, at())
+	if !strings.Contains(reply, "누적 참여 0회차") {
+		t.Errorf("참여 0 이 표시되지 않았다:\n%s", reply)
+	}
+}
+
+// **누적은 모니터 기동 이후다.** 이력은 메모리에만 있고(report.go 문서),
+// 재기동하면 0 부터 다시 센다. 그 사실을 적지 않으면 재기동 직후의 "누적
+// 참여 1회차" 가 전체 기간의 값으로 읽힌다.
+func TestStatusSaysCumulativeIsSinceMonitorStart(t *testing.T) {
+	st := newTestState()
+	playRounds(t, st, 2, 1, 1)
+
+	reply, _ := routeCommand("/status", st, at())
+	if !strings.Contains(reply, "기동 이후") {
+		t.Errorf("누적의 기준 구간이 적히지 않았다:\n%s", reply)
 	}
 }
