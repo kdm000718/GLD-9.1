@@ -318,9 +318,12 @@ func newHarness(t *testing.T) *harness {
 		Fills:      h.fills,
 		Ledger:     h.led,
 		StaleAfter: 3 * time.Second,
-		Poll:       100 * time.Millisecond,
-		Clock:      h.clk.now,
-		MonoClock:  h.clk.monoNs,
+		// 합성 회차가 1초이므로 창이 회차 전체를 덮는다 — 진입 창을 **보는**
+		// 시험은 아래에서 창을 직접 좁힌다.
+		EntryWindow: time.Second,
+		Poll:        100 * time.Millisecond,
+		Clock:       h.clk.now,
+		MonoClock:   h.clk.monoNs,
 		Sleep: func(_ context.Context, d time.Duration) error {
 			h.clk.advance(d)
 			h.steps++
@@ -515,6 +518,105 @@ func TestUnrepresentableLimitPriceIsAnError(t *testing.T) {
 	}
 	if h.orders.createdCount() != 0 {
 		t.Error("표현할 수 없는 가격인데 주문이 나갔다")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 진입 창 — 회차 중간에는 걸지 않는다
+// ---------------------------------------------------------------------------
+
+// **회차 시작 창을 넘기면 아무것도 걸지 않는다.**
+//
+// `p_up` 은 회차 시작(+0분) 정보로 동결된 값이다. 시작 90초 뒤에 그 값으로
+// 거는 것은 이미 90초 움직인 시장에 90초 전의 판단으로 베팅하는 것이고,
+// G2 가 잰 엣지는 회차 시작 근처 진입을 가정한 값이다.
+func TestLateRoundPlacesNothing(t *testing.T) {
+	h := newHarness(t)
+	h.runner.EntryWindow = 200 * time.Millisecond
+	// 회차가 시작한 지 300ms 지난 뒤에야 이 회차를 잡았다(재시작 직후의 모양).
+	h.clk.advance(300 * time.Millisecond)
+
+	if err := h.run(); err != nil {
+		t.Fatalf("RunRound: %v", err)
+	}
+	if n := h.orders.createdCount(); n != 0 {
+		t.Errorf("주문 %d건 — 진입 창이 지난 회차에 걸었다", n)
+	}
+	if n := h.orders.removeCount(); n != 0 {
+		t.Errorf("취소 %d회 — 걸지도 않았는데 거둘 것이 있었다", n)
+	}
+}
+
+// 창 안이면 평소대로 건다. 위 가드가 "언제나 안 건다"로 굳으면 봇이 조용히
+// 아무것도 하지 않는다.
+func TestInsideTheWindowStillPlaces(t *testing.T) {
+	h := newHarness(t)
+	h.runner.EntryWindow = 500 * time.Millisecond
+	h.clk.advance(100 * time.Millisecond)
+
+	if err := h.run(); err != nil {
+		t.Fatalf("RunRound: %v", err)
+	}
+	if n := h.orders.createdCount(); n != 1 {
+		t.Errorf("주문 %d건, 기대 1건 — 창 안인데 걸지 않았다", n)
+	}
+}
+
+// **창은 회차 시작에서 잰다. 우리가 이 회차를 잡은 시각이 아니다.**
+//
+// 회차를 제때 잡았어도 조회가 늦으면 주문은 얼마든지 늦게 나갈 수 있다 —
+// 배선(-max-join-late)의 회차 선택 가드가 잡지 못하는 자리가 정확히 이것이고,
+// 그래서 exec 안에 같은 창이 한 번 더 있다.
+func TestSlowStartStillMissesTheWindow(t *testing.T) {
+	h := newHarness(t)
+	h.runner.EntryWindow = 200 * time.Millisecond
+	// 회차는 제때 잡았다(경과 0). 그러나 체결 조회가 세 바퀴(300ms) 실패해
+	// 그동안 주문을 낼 수 없었다.
+	h.fills.pollFn = func(n int) ([]ledger.Fill, error) {
+		if n < 3 {
+			return nil, errors.New("일시적 조회 실패")
+		}
+		return nil, nil
+	}
+	if err := h.run(); err != nil {
+		t.Fatalf("RunRound: %v", err)
+	}
+	if n := h.orders.createdCount(); n != 0 {
+		t.Errorf("주문 %d건 — 조회가 회복됐을 때는 이미 창이 지났다", n)
+	}
+}
+
+// 재시도도 창을 지킨다. 재시도 경로에만 창이 없으면, 첫 시도가 실패한 회차만
+// 창 밖에서 걸린다 — 로그로는 정상 주문과 구분되지 않는다.
+func TestRetriesRespectTheWindow(t *testing.T) {
+	h := newHarness(t)
+	h.runner.EntryWindow = 200 * time.Millisecond
+	h.runner.RejectBackoff = 300 * time.Millisecond // 다음 시도는 창 밖이다
+	h.orders.createFn = func(n int, _ Request) (CreateResult, error) {
+		if n == 0 {
+			return CreateResult{}, &fakeOrderError{safe: true, msg: "거래소 거부"}
+		}
+		id := fmt.Sprintf("ord-%d", n)
+		return CreateResult{ID: id, Hash: "hash-" + id}, nil
+	}
+	if err := h.run(); err != nil {
+		t.Fatalf("RunRound: %v", err)
+	}
+	if n := h.orders.createdCount(); n != 1 {
+		t.Errorf("주문 생성 %d회, 기대 1회 — 재시도가 창을 넘어갔다", n)
+	}
+}
+
+// **제로값을 '창 없음'으로 읽으면 안 된다.** 배선 실수 하나가 "회차 중간에도
+// 건다"를 되살리고, 그 사실은 어떤 로그에도 남지 않는다.
+func TestEntryWindowMustBeSet(t *testing.T) {
+	h := newHarness(t)
+	h.runner.EntryWindow = 0
+	if err := h.run(); err == nil {
+		t.Fatal("EntryWindow 가 0 인데 회차를 돌렸다")
+	}
+	if h.orders.createdCount() != 0 {
+		t.Error("EntryWindow 가 0 인데 주문이 나갔다")
 	}
 }
 

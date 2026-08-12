@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -324,11 +322,7 @@ func TestWaitWaitsForTheRunningPass(t *testing.T) {
 // 보자고 세울 수 없다. 소스 스캔은 거친 대신 **호출부가 사라지는 순간**을
 // 정확히 잡는다.
 func TestRoundLoopCallsAutoClaim(t *testing.T) {
-	src, err := os.ReadFile(filepath.Clean("main.go"))
-	if err != nil {
-		t.Fatalf("main.go: %v", err)
-	}
-	s := string(src)
+	s := mainSource(t)
 	for _, want := range []string{
 		// 회차 종료마다 한 바퀴.
 		"claimer.after(runCtx, t.round.Slug)",

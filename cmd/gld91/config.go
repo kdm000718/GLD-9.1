@@ -123,7 +123,14 @@ type Config struct {
 	FillsPoll time.Duration
 	// RoundPoll 은 회차 목록 재조회 주기다.
 	RoundPoll time.Duration
-	// MaxJoinLate 는 "이미 시작한 회차에 늦게 합류해도 되는" 상한이다.
+	// MaxJoinLate 는 **회차 시작으로부터 주문을 낼 수 있는 창**이다.
+	//
+	// 두 곳을 함께 정한다: 회차를 잡을지(router.pick)와 주문을 낼지
+	// (exec.Runner.EntryWindow). 둘을 다른 값으로 두면 "잡았지만 못 거는"
+	// 구간이 생기고, 그 구간에서 무슨 일이 일어나는지 두 숫자를 함께 봐야
+	// 알 수 있다.
+	//
+	// 근거와 실측은 exec.DefaultEntryWindow 문서에 있다.
 	MaxJoinLate time.Duration
 
 	// Minutes 는 실행 시간 상한이다. 0 이면 무제한.
@@ -171,7 +178,8 @@ func Flags(fs *flag.FlagSet) *Config {
 	fs.DurationVar(&c.FillsPoll, "fills-poll", DefaultFillsPollInterval,
 		"체결 조회(REST) 최소 간격. 이 값이 곧 노출 갱신 지연이다")
 	fs.DurationVar(&c.RoundPoll, "round-poll", 20*time.Second, "회차 목록 재조회 주기")
-	fs.DurationVar(&c.MaxJoinLate, "max-join-late", 120*time.Second, "이미 시작한 회차에 합류할 수 있는 최대 경과")
+	fs.DurationVar(&c.MaxJoinLate, "max-join-late", exec.DefaultEntryWindow,
+		"회차 시작으로부터 주문을 낼 수 있는 창. 지나면 그 회차에는 걸지 않는다")
 	fs.Float64Var(&c.Minutes, "minutes", 0, "실행 시간 상한(분). 0 이면 무제한")
 	fs.BoolVar(&c.IncludePositions, "include-positions", false,
 		"미정산 포지션 취득원가를 equity 에 더한다 (기본 false = 보수적)")
@@ -205,8 +213,10 @@ func checkConfig(c *Config) error {
 	if c.RoundPoll <= 0 {
 		return fmt.Errorf("-round-poll 이 %s 다", c.RoundPoll)
 	}
-	if c.MaxJoinLate < 0 {
-		return fmt.Errorf("-max-join-late 가 음수다 (%s)", c.MaxJoinLate)
+	// **0 이하는 '창 없음'이 아니라 '설정 안 됨'이다.** 0 이면 시작 직후 한
+	// 순간을 빼고 어떤 회차도 잡히지 않아 봇이 조용히 아무것도 하지 않는다.
+	if c.MaxJoinLate <= 0 {
+		return fmt.Errorf("-max-join-late 가 %s 다 — 양수여야 한다 (회차 시작 후 주문을 낼 수 있는 창이다)", c.MaxJoinLate)
 	}
 	if c.Minutes < 0 {
 		return fmt.Errorf("-minutes 가 음수다 (%v)", c.Minutes)

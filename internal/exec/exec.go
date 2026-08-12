@@ -268,6 +268,29 @@ const (
 	// 이 안에 확인하지 못하면 에러다 — 잊힌 주문은 체결된다.
 	DefaultFinalCancelTimeout = 30 * time.Second
 
+	// DefaultEntryWindow 는 회차 시작으로부터 **주문을 낼 수 있는 창**이다.
+	// 이 창이 지나면 그 회차에는 아무것도 걸지 않는다.
+	//
+	// # 왜 창이 필요한가
+	//
+	// `p_up` 은 회차 시작(+0분) 정보로 동결된 값이다. 시작 90초 뒤에 그 값으로
+	// 거는 것은 **이미 90초 움직인 시장에 90초 전의 판단으로 베팅하는 것**이고,
+	// G2 가 잰 엣지는 회차 시작 근처 진입을 가정한 값이다.
+	//
+	// 예전에는 이 가드가 배선(cmd/gld91 의 -max-join-late, 기본 120초)에만
+	// 있었고 회차 선택만 막았다. 선택이 제때 됐어도 equity 조회가 늦으면
+	// 주문은 얼마든지 늦게 나갈 수 있었다 — 그 자리가 여기다.
+	//
+	// # 5초의 근거 (2026-08-12 실측, 291회차)
+	//
+	//	회차 진입        중앙 0.036초  p90 0.053초
+	//	equity 조회 완료  중앙 0.525초  p90 0.593초
+	//	첫 주문          중앙 0.527초  p90 0.602초   ← 99.2% 가 2초 안
+	//
+	// 10초를 넘긴 것은 241건 중 2건뿐이고 둘 다 재시작 뒤 늦은 합류였다
+	// (30.6초, 81.0초). 5초는 p90 의 8배 여유를 두고 그 둘을 자른다.
+	DefaultEntryWindow = 5 * time.Second
+
 	// DefaultSettleGrace 는 취소가 확인된 주문의 체결 여부를 **거래소에 묻지
 	// 못했을 때**, 체결 피드가 따라잡았다고 볼 때까지 기다리는 시간이다.
 	//
@@ -328,6 +351,13 @@ type Runner struct {
 	// 그럼에도 0 이하를 거부하는 이유: 제로값이 "항상 stale" 로 읽혀도,
 	// "문턱 없음" 으로 읽혀도 기록이 거짓말을 한다.
 	StaleAfter time.Duration
+	// EntryWindow 는 회차 시작으로부터 주문을 낼 수 있는 창이다. 지나면 그
+	// 회차에는 걸지 않는다. 근거는 [DefaultEntryWindow] 에 있다.
+	//
+	// **0 이하면 회차를 돌지 않는다.** StaleAfter 와 같은 규약이다 — 제로값이
+	// "창 없음"으로 읽히면 배선 실수 하나가 "회차 중간에도 건다"를 되살리고,
+	// 그 사실은 어떤 로그에도 남지 않는다.
+	EntryWindow time.Duration
 	// Poll 은 루프 주기다. 0 이면 DefaultPoll.
 	Poll time.Duration
 	// RejectBackoff 는 0 이면 DefaultRejectBackoff.
@@ -780,6 +810,10 @@ func (r *Runner) check(rd live.Round, f live.Frozen) error {
 	if r.StaleAfter <= 0 {
 		return fmt.Errorf("exec: StaleAfter 가 %s 다 — 제로값은 '문턱 없음'이 아니라 '설정 안 됨'이다", r.StaleAfter)
 	}
+	if r.EntryWindow <= 0 {
+		return fmt.Errorf("exec: EntryWindow 가 %s 다 — 제로값은 '창 없음'이 아니라 '설정 안 됨'이다"+
+			" (회차 중간 진입을 막는 가드다)", r.EntryWindow)
+	}
 	// order.Full·order.Ceiling 은 이 범위 밖에서 패닉한다([limitTick] 이 둘 다
 	// 부른다). 살아 있는 주문을 들기 전에 여기서 막아야 패닉이 일어날 자리가
 	// 없어진다.
@@ -846,10 +880,15 @@ func tokenDirectionError(direction string) error {
 // 회차가 끝날 때까지 그 자리에 있다 — 그것이 이 전략의 전부다.
 func (r *Runner) loop(ctx context.Context, rd live.Round, f live.Frozen, e risk.Equity, tokenID string, st *roundState, tick order.Tick, view bookView) error {
 	// placed 는 "이 회차에서 주문을 낼 일이 끝났다"는 뜻이다. 성공했거나, 낼
-	// 수 없었거나, 재시도를 다 썼다.
+	// 수 없었거나, 재시도를 다 썼거나, 진입 창이 지났다.
 	placed := false
 	attempts := 0
 	var nextAttempt time.Time
+
+	// **진입 창은 회차 시작에서 잰다.** 우리가 이 회차를 언제 잡았는지가
+	// 아니라 회차가 언제 시작했는지가 기준이다 — 늦게 잡은 것이 늦게 걸어도
+	// 되는 이유가 될 수는 없다. p_up 은 시작 시점의 값이다.
+	entryDeadline := rd.StartsAt.Add(r.EntryWindow)
 
 	for {
 		now := r.now()
@@ -871,7 +910,18 @@ func (r *Runner) loop(ctx context.Context, rd live.Round, f live.Frozen, e risk.
 			r.logf("회차 %s: 체결 조회 실패 — 이 주기에는 신규 주문을 내지 않는다: %v", rd.Slug, err)
 		}
 
-		// 2) 아직 안 걸었으면 건다. **이 블록이 회차당 한 번만 통과한다.**
+		// 2) 진입 창이 지났으면 이 회차에는 걸지 않는다.
+		//
+		// **회차 중간에 거는 것은 90초 움직인 시장에 90초 전의 판단으로
+		// 베팅하는 것이다.** 늦게 잡힌 회차(재시작 직후, 조회 지연)를 조용히
+		// 통과시키면 그 베팅이 원장에서 정상 회차와 구분되지 않는다.
+		if !placed && !now.Before(entryDeadline) {
+			placed = true
+			r.logf("회차 %s: 진입 창 %s 이 지났다(시작 후 %s) — 이 회차에는 걸지 않는다",
+				rd.Slug, r.EntryWindow, now.Sub(rd.StartsAt).Truncate(time.Millisecond))
+		}
+
+		// 3) 아직 안 걸었으면 건다. **이 블록이 회차당 한 번만 통과한다.**
 		//
 		// 호가창은 보지 않는다 — 가격이 상수라 볼 이유가 없다. 낡은 호가창을
 		// 이유로 미루면 근거 없이 회차의 앞부분을 버리는 일이고, 큐 위치는
@@ -895,17 +945,17 @@ func (r *Runner) loop(ctx context.Context, rd live.Round, f live.Frozen, e risk.
 			}
 		}
 
-		// 3) 취소를 확인할 때까지 물고 늘어진다. 취소 재시도는 멱등이라 안전하다.
+		// 4) 취소를 확인할 때까지 물고 늘어진다. 취소 재시도는 멱등이라 안전하다.
 		//
 		//    회차 중에 취소가 생기는 경로는 없지만(옮기지 않으므로) 이 호출은
 		//    남겨 둔다 — 생성 결과 불명으로 곧바로 취소 대기에 들어간 주문이
 		//    있을 수 있고, 그것을 회차 끝까지 방치하면 잊힌 매수 주문이 된다.
 		r.sweepPending(ctx, st, now)
-		// 3-1) 취소가 확인된 주문에 "얼마나 찼나"를 묻는다. **이것이 노출을
+		// 4-1) 취소가 확인된 주문에 "얼마나 찼나"를 묻는다. **이것이 노출을
 		//      푸는 유일한 자리다.**
 		r.resolveConfirming(ctx, st, r.now())
 
-		// 4) 바깥에 우리 상태를 복사해 준다. 관측 전용이다 — 이 호출의 결과가
+		// 5) 바깥에 우리 상태를 복사해 준다. 관측 전용이다 — 이 호출의 결과가
 		//    회차 진행에 영향을 주는 경로는 없다.
 		r.observe(st)
 

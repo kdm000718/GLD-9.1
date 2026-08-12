@@ -251,13 +251,12 @@ func run(cfg *Config) error {
 	}
 
 	runner := &exec.Runner{
-		Orders:     sender,
-		Fills:      fills,
-		Ledger:     l,
-		StaleAfter: cfg.StaleAfter,
-		Poll:       cfg.Poll,
-		Log:        logf,
+		Orders: sender,
+		Fills:  fills,
+		Ledger: l,
+		Log:    logf,
 	}
+	applyTiming(runner, cfg)
 
 	predictor := &live.Predictor{Model: m}
 
@@ -292,6 +291,21 @@ func run(cfg *Config) error {
 	claimer := newAutoClaim(cfg, secrets.Account, signer, l, os.Getenv, logf)
 
 	return loop(ctx, cfg, rc, runner, predictor, equitySrc, wire, claimer)
+}
+
+// applyTiming 은 설정의 시간 값들을 집행자에게 옮긴다.
+//
+// **구조체 리터럴 안의 한 줄이 아니라 함수인 이유는 시험이 닿게 하기
+// 위해서다.** 리터럴 안에서는 `EntryWindow: cfg.MaxJoinLate` 를
+// `EntryWindow: 10*time.Minute` 로 바꿔도 어떤 시험도 깨지지 않는다 — 이
+// 저장소가 반복해서 당한 고장이 정확히 그 모양이다(함수는 맞는데 부르는
+// 자리가 틀렸다). 그리고 그 한 줄이 "회차 중간에는 걸지 않는다"를 정한다.
+func applyTiming(r *exec.Runner, cfg *Config) {
+	r.StaleAfter = cfg.StaleAfter
+	// **회차 중간에는 걸지 않는다.** router.pick 이 늦은 회차를 걸러도 조회가
+	// 늦으면 주문은 얼마든지 늦게 나갈 수 있어서, 같은 값을 exec 에도 준다.
+	r.EntryWindow = cfg.MaxJoinLate
+	r.Poll = cfg.Poll
 }
 
 // armLabel 은 LIVE_ARM 을 로그에 남기되 **값을 그대로 찍지 않는다.**

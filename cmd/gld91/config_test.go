@@ -2,10 +2,29 @@ package main
 
 import (
 	"flag"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kdm000718/GLD-9.1/internal/exec"
 )
+
+// mainSource 는 main.go 원문이다.
+//
+// **호출부를 지키는 유일한 수단이라서 있다.** 이 저장소가 반복해서 당한
+// 고장은 "함수는 맞는데 부르는 자리가 없다" 이고, 그 자리가 배선(main.go)에
+// 있으면 값 시험으로는 절대 잡히지 않는다 — loop() 를 통째로 돌리려면 WS·
+// REST·모델이 전부 필요하기 때문이다.
+func mainSource(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Clean("main.go"))
+	if err != nil {
+		t.Fatalf("main.go: %v", err)
+	}
+	return string(b)
+}
 
 // LIVE_ARM 이 **정확히** 그 값일 때만 전송한다. 오타·빈 값·"true"·소문자·
 // 앞뒤 공백은 전부 DRY-RUN 이다.
@@ -150,6 +169,9 @@ func TestCheckConfigRejectsBadValues(t *testing.T) {
 		{"round-poll 0", func(c *Config) { c.RoundPoll = 0 }, "round-poll"},
 		{"minutes 음수", func(c *Config) { c.Minutes = -1 }, "minutes"},
 		{"max-join-late 음수", func(c *Config) { c.MaxJoinLate = -time.Second }, "max-join-late"},
+		// **0 은 '창 없음'이 아니라 '설정 안 됨'이다.** 그 값이면 어떤 회차도
+		// 잡히지 않아 봇이 조용히 아무것도 하지 않는다.
+		{"max-join-late 0", func(c *Config) { c.MaxJoinLate = 0 }, "max-join-late"},
 		{"가짜 자본 음수", func(c *Config) { c.DryRunEquityUSDT = -1 }, "dry-run-equity"},
 		{"다른 심볼", func(c *Config) { c.Symbol = "eth" }, "symbol"},
 		{"exchange 가 주소가 아니다", func(c *Config) { c.Exchange = "0xdead" }, "exchange"},
@@ -226,5 +248,55 @@ func TestFillsPollDefault(t *testing.T) {
 	}
 	if DefaultFillsPollInterval <= 0 || DefaultFillsPollInterval > MaxFillsPollInterval {
 		t.Errorf("기본 주기 %s 가 스스로 상한을 벗어난다", DefaultFillsPollInterval)
+	}
+}
+
+// **설정의 시간 값이 집행자에게 실제로 닿는지 본다.**
+//
+// 특히 EntryWindow 다. 그 값 하나가 "회차 중간에는 걸지 않는다"를 정하는데,
+// 구조체 리터럴 안에 있는 동안에는 어떤 시험도 그것을 보지 못했다 — 10분으로
+// 바꿔 놓아도 전부 통과했다.
+func TestTimingReachesTheRunner(t *testing.T) {
+	cfg := &Config{
+		StaleAfter:  7 * time.Second,
+		MaxJoinLate: 11 * time.Second,
+		Poll:        13 * time.Millisecond,
+	}
+	var r exec.Runner
+	applyTiming(&r, cfg)
+
+	if r.EntryWindow != cfg.MaxJoinLate {
+		t.Errorf("EntryWindow = %s, want %s — 회차 중간 진입을 막는 값이다", r.EntryWindow, cfg.MaxJoinLate)
+	}
+	if r.StaleAfter != cfg.StaleAfter {
+		t.Errorf("StaleAfter = %s, want %s", r.StaleAfter, cfg.StaleAfter)
+	}
+	if r.Poll != cfg.Poll {
+		t.Errorf("Poll = %s, want %s", r.Poll, cfg.Poll)
+	}
+}
+
+// 기본값도 못 박는다. 실측(291회차)에서 첫 주문의 p90 이 0.60초였고 10초를
+// 넘긴 것은 재시작 뒤 늦은 합류 2건뿐이다 — 기본이 조용히 늘어나면 그 2건이
+// 다시 정상 주문처럼 원장에 들어온다.
+func TestDefaultEntryWindowIsTight(t *testing.T) {
+	fs := flag.NewFlagSet("t", flag.ContinueOnError)
+	c := Flags(fs)
+	if err := fs.Parse(nil); err != nil {
+		t.Fatal(err)
+	}
+	if c.MaxJoinLate != exec.DefaultEntryWindow {
+		t.Errorf("-max-join-late 기본 %s, want %s", c.MaxJoinLate, exec.DefaultEntryWindow)
+	}
+	if c.MaxJoinLate > 10*time.Second {
+		t.Errorf("-max-join-late 기본이 %s 다 — 회차 중간 진입을 허용하는 값이다", c.MaxJoinLate)
+	}
+}
+
+// applyTiming 이 값을 옮기는 것과, main.go 가 **그것을 부르는 것**은 다른
+// 문제다. 호출부가 사라지고 리터럴이 돌아오면 위 시험은 그대로 통과한다.
+func TestRunnerIsBuiltThroughApplyTiming(t *testing.T) {
+	if !strings.Contains(mainSource(t), "applyTiming(runner, cfg)") {
+		t.Error("main.go 가 applyTiming(runner, cfg) 를 부르지 않는다 — EntryWindow 가 배선되지 않으면 회차 중간에도 걸린다")
 	}
 }
