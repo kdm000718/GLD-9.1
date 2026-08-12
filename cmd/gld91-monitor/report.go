@@ -198,20 +198,65 @@ func formatReport(t tally, snap *beat.Snapshot, window string) string {
 // observeRoundLocked 는 beat 하나에서 참여 회차를 갱신한다.
 //
 // 회차마다 계속 덮어쓴다 — 마지막 값이 그 회차의 최종 체결이다.
-func (s *state) observeRoundLocked(snap beat.Snapshot) {
+//
+// **바뀐 것이 있을 때만 참을 돌려준다.** beat 는 3초마다 오는데 한 회차의
+// 체결은 몇 번 변하고 만다. 매 beat 마다 참을 돌려주면 디스크에 이력을 3초마다
+// 쓰게 되고, 그 쓰기는 아무것도 새로 담지 않는다.
+func (s *state) observeRoundLocked(snap beat.Snapshot) (changed bool) {
 	slug := snap.Round.Slug
 	if slug == "" || snap.Exposure.FilledShares <= 0 {
-		return // 걸지 않은 회차는 이력에 남기지 않는다
+		return false // 걸지 않은 회차는 이력에 남기지 않는다
 	}
 	p, ok := s.rounds[slug]
 	if !ok {
 		p = &participation{Slug: slug}
 		s.rounds[slug] = p
+		changed = true
+	}
+	if p.Outcome != snap.Round.Outcome || p.Cost != snap.Exposure.Filled ||
+		p.Shares != snap.Exposure.FilledShares || !p.EndsAt.Equal(snap.Round.EndsAt) {
+		changed = true
 	}
 	p.Outcome = snap.Round.Outcome
 	p.Cost = snap.Exposure.Filled
 	p.Shares = snap.Exposure.FilledShares
 	p.EndsAt = snap.Round.EndsAt
+	return changed
+}
+
+// attachStore 는 저장소를 붙이고 저장된 이력을 읽어 들인다.
+//
+// **기동 때 한 번만 부른다.** 읽어 들인 회차는 메모리의 같은 슬러그를 덮지
+// 않는다 — beat 로 방금 본 것이 파일보다 새롭다.
+func (s *state) attachStore(t *store) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.store = t
+	for _, p := range t.load() {
+		if _, ok := s.rounds[p.Slug]; ok {
+			continue
+		}
+		cp := p
+		s.rounds[p.Slug] = &cp
+	}
+}
+
+// persist 는 지금 이력을 디스크에 쓴다.
+//
+// **잠금을 잡은 채로 부르면 안 된다.** 파일 쓰기는 잠금 밖에서 한다 — 안
+// 그러면 디스크가 느린 순간에 beat 수신이 통째로 막힌다.
+func (s *state) persist() {
+	s.mu.Lock()
+	t := s.store
+	s.mu.Unlock()
+	if !t.enabled() {
+		return
+	}
+	if err := t.save(s.Participations()); err != nil {
+		// 저장 실패는 감시를 멈추지 않는다. 다만 조용하면 안 된다 —
+		// 다음 재기동에서 누적이 0 이 되는 이유가 여기에 있다.
+		t.log("이력 저장 실패 — 재기동하면 이만큼을 잃는다: %v", err)
+	}
 }
 
 // ApplySettlements 는 관측한 정산 결과를 참여 회차에 맞춘다.
@@ -221,7 +266,18 @@ func (s *state) observeRoundLocked(snap beat.Snapshot) {
 // 배열에서만 의미가 있다(모니터는 그 배열을 안 받는다). 대소문자는 무시한다.
 // 돌려주는 것은 **실제로 반영된 건수**다. 받은 건수가 아니라 이것이 정산
 // 경로가 도는지를 말해 준다 — 우리가 걸지 않은 회차는 아무리 받아도 0 이다.
+// **저장은 이 함수가 스스로 한다.** 호출자가 기억해야 하는 구조로 두면 새
+// 호출자가 생겼을 때 정산이 조용히 디스크에 안 남고, 그 사실은 다음 재기동에서
+// 승률이 낮아지는 모습으로만 나타난다.
 func (s *state) ApplySettlements(ss []settlement) int {
+	applied := s.applySettlementsLocked(ss)
+	if applied > 0 {
+		s.persist() // 잠금 밖이다
+	}
+	return applied
+}
+
+func (s *state) applySettlementsLocked(ss []settlement) int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	applied := 0

@@ -86,7 +86,14 @@ func routeCommand(text string, s *state, now time.Time) (reply string, handled b
 func formatStatus(s *state, now time.Time) string {
 	snap, last := s.Latest()
 	if snap == nil {
-		return "아직 봇의 beat 를 받지 못했습니다. 봇이 기동됐는지, MONITOR_BEAT_SECRET 이 양쪽에서 같은지 확인하세요."
+		msg := "아직 봇의 beat 를 받지 못했습니다. 봇이 기동됐는지, MONITOR_BEAT_SECRET 이 양쪽에서 같은지 확인하세요."
+		// **이력은 beat 와 독립이다.** 디스크에서 읽어 왔으므로 봇이 죽어
+		// 있어도 답할 수 있고, 하필 그때가 지난 성적을 가장 보고 싶은
+		// 순간이다. 이력이 비어 있으면 아무 말도 보태지 않는다.
+		if t := accumulate(s.Participations()); t.Participated > 0 {
+			msg += "\n\n" + formatCumulative(t)
+		}
+		return msg
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "💰 가용 %.2f / 미정산 취득원가 %.2f USDT\n", snap.Equity.AvailableUSDT, snap.Equity.PositionCost)

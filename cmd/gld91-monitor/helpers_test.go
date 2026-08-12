@@ -25,6 +25,6 @@ func healthySnapshot() *beat.Snapshot {
 			WSLastDataAt: now, RateLimitRemaining: 118,
 			LastActionAt: now.Add(-3 * time.Minute), LastLoopAt: now,
 		},
-		Skips:    map[beat.SkipReason]int{},
+		Skips: map[beat.SkipReason]int{},
 	}
 }

@@ -47,6 +47,8 @@ func run() error {
 	}
 
 	st := newState(wantConsts(), cfg.BeatSecret)
+	// 이력 저장소. 경로가 없으면 아무것도 하지 않는다(메모리에만 둔다).
+	st.attachStore(&store{path: cfg.StatePath, logf: log.Printf})
 	tg := newTG(cfg.TGToken, cfg.TGChat)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

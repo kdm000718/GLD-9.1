@@ -59,6 +59,8 @@ type state struct {
 	// rounds 는 우리가 실제로 건 회차의 이력이다. **모니터는 봇의 원장을 읽을
 	// 수 없으므로**(다른 호스트다) beat 로 지나가는 것을 여기서 누적한다.
 	rounds map[string]*participation
+	// store 는 이력의 디스크 사본이다. nil 이면 메모리에만 둔다.
+	store *store
 
 	latch *rule.Latch
 
@@ -220,14 +222,20 @@ func (s *state) handleBeat(w http.ResponseWriter, r *http.Request) {
 		s.bootID = snap.BootID
 		s.gate.Reset()
 	}
+	roundChanged := false
 	admitErr := s.gate.Admit(snap.Seq, snap.TS, now)
 	if admitErr == nil {
 		s.latest, s.lastBeat = &snap, now
 		s.trackSkipLocked(snap)
-		s.observeRoundLocked(snap)
+		roundChanged = s.observeRoundLocked(snap)
 	}
 	cmd := s.pending
 	s.mu.Unlock()
+
+	// **잠금 밖에서 쓴다.** 디스크가 느린 순간에 beat 수신이 막히면 안 된다.
+	if roundChanged {
+		s.persist()
+	}
 
 	if admitErr != nil {
 		// Admit 이 거절하는 이유는 재전송(seq 역행)과 시계 어긋남 둘이고,

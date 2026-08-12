@@ -25,6 +25,9 @@ const (
 	// EnvBotAPIKey 는 봇의 키다. 전용 키(EnvMonAPIKey)가 없으면 이것으로
 	// 떨어지고, 그때 예산을 나눠 쓰게 되므로 조회가 보수적으로 바뀐다.
 	EnvBotAPIKey = "PREDICT_API_KEY"
+	// EnvStatePath 는 참여 이력을 남길 파일이다. **비면 저장하지 않는다** —
+	// 그때는 예전처럼 메모리에만 두고, 재기동하면 누적이 0 부터 다시 센다.
+	EnvStatePath = "MONITOR_STATE_FILE"
 )
 
 // defaultListen 은 기본 수신 주소다.
@@ -48,6 +51,8 @@ type monitorConfig struct {
 	// 나눠 쓰므로 보수적으로 움직여야 한다(settle.go).
 	SharedKey      bool
 	ReportInterval time.Duration
+	// StatePath 는 참여 이력 파일이다. 비면 저장하지 않는다.
+	StatePath string
 }
 
 // LoadConfig 는 환경변수에서 설정을 읽는다. 테스트는 맵 조회를 넘긴다.
@@ -57,6 +62,7 @@ func loadMonitorConfig(getenv func(string) string) (monitorConfig, error) {
 	c := monitorConfig{
 		BeatSecret:     []byte(get(EnvBeatSecret)),
 		Listen:         get(EnvListen),
+		StatePath:      get(EnvStatePath),
 		TGToken:        get(EnvTGToken),
 		APIKey:         get(EnvMonAPIKey),
 		ReportInterval: defaultReportInterval,
