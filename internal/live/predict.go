@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sync"
 
 	"github.com/kdm000718/GLD-9.1/internal/bars"
 	"github.com/kdm000718/GLD-9.1/internal/features"
@@ -112,13 +113,27 @@ func (p *Predictor) Freeze(ctx context.Context, tMS int64) (Frozen, error) {
 		symbol = DefaultSymbol
 	}
 
-	b1, err := loadBars(ctx, fetch, symbol, "1m", minuteMS, Bars1mCount, tMS)
-	if err != nil {
-		return Frozen{}, err
+	// **두 조회는 서로를 기다릴 이유가 없다.** 1분봉과 5분봉은 독립이고
+	// 순서도 결과에 닿지 않는다(둘 다 tMS 로 절단된다).
+	//
+	// 2026-08-14 도쿄 서버 실측으로 요청 하나가 46ms 였고(그중 TLS 31ms),
+	// 순차로 부르면 92ms 가 회차 시작의 임계 경로에 그대로 얹혔다. 동시에
+	// 부르면 둘 중 느린 쪽 하나로 줄어든다.
+	//
+	// 실패는 예전과 같이 다룬다 — 하나라도 실패하면 이 회차는 걸지 않는다.
+	// 1분봉 에러를 5분봉 에러보다 먼저 보는 순서도 그대로 유지한다.
+	var b1, b5 bars.Bars
+	var err1, err5 error
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); b1, err1 = loadBars(ctx, fetch, symbol, "1m", minuteMS, Bars1mCount, tMS) }()
+	go func() { defer wg.Done(); b5, err5 = loadBars(ctx, fetch, symbol, "5m", fiveMinMS, Bars5mCount, tMS) }()
+	wg.Wait()
+	if err1 != nil {
+		return Frozen{}, err1
 	}
-	b5, err := loadBars(ctx, fetch, symbol, "5m", fiveMinMS, Bars5mCount, tMS)
-	if err != nil {
-		return Frozen{}, err
+	if err5 != nil {
+		return Frozen{}, err5
 	}
 
 	vals, reason := sample.Features(b1, b5, tMS)

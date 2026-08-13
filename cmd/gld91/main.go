@@ -290,7 +290,11 @@ func run(cfg *Config) error {
 	// 적으면 한 회차의 지출과 수입이 두 파일에 흩어진다.
 	claimer := newAutoClaim(cfg, secrets.Account, signer, l, os.Getenv, logf)
 
-	return loop(ctx, cfg, rc, runner, predictor, equitySrc, wire, claimer)
+	// equity 선조회. 회차 사이 조용한 구간에서만 돌고, 값이 오래되면 회차
+	// 시작에서 그 자리 조회로 떨어진다(equityahead.go).
+	ahead := newEquityAhead(equitySrc, cfg, logf)
+
+	return loop(ctx, cfg, rc, runner, predictor, equitySrc, wire, claimer, ahead)
 }
 
 // applyTiming 은 설정의 시간 값들을 집행자에게 옮긴다.
@@ -306,6 +310,10 @@ func applyTiming(r *exec.Runner, cfg *Config) {
 	// 늦으면 주문은 얼마든지 늦게 나갈 수 있어서, 같은 값을 exec 에도 준다.
 	r.EntryWindow = cfg.MaxJoinLate
 	r.Poll = cfg.Poll
+	// **기동 시각.** exec 는 이 값으로 "이 회차가 시작하기 전부터 우리가 살아
+	// 있었나" 를 답하고, 그 답이 참일 때만 첫 바퀴 체결 조회를 건너뛴다.
+	// 배선하지 않으면(제로) 건너뛰지 않으므로 예전 동작이 된다.
+	r.StartedAt = time.Now()
 }
 
 // armLabel 은 LIVE_ARM 을 로그에 남기되 **값을 그대로 찍지 않는다.**
@@ -514,7 +522,8 @@ func (rt *router) pollRounds(ctx context.Context, rc *rest.Client, wsc *ws.Clien
 
 // loop 는 회차를 하나씩 돈다.
 func loop(ctx context.Context, cfg *Config, rc *rest.Client, runner *exec.Runner,
-	predictor *live.Predictor, equitySrc *live.EquitySource, wire *beatWire, claimer *autoClaim) error {
+	predictor *live.Predictor, equitySrc *live.EquitySource, wire *beatWire, claimer *autoClaim,
+	ahead *equityAhead) error {
 
 	if cfg.Minutes > 0 {
 		var cancel context.CancelFunc
@@ -554,9 +563,12 @@ func loop(ctx context.Context, cfg *Config, rc *rest.Client, runner *exec.Runner
 	// 돈은 돌아왔는데 정산 행만 사라진다.
 	runCtx, cancelAll := context.WithCancel(ctx)
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
 	go func() { defer wg.Done(); _ = wsc.Run(runCtx) }()
 	go func() { defer wg.Done(); rt.pollRounds(runCtx, rc, wsc, cfg) }()
+	// equity 를 회차 사이의 조용한 구간에 미리 받아 둔다. 회차 시작의 임계
+	// 경로에서 REST 왕복 하나가 빠진다(equityahead.go).
+	go func() { defer wg.Done(); ahead.run(runCtx) }()
 	defer wg.Wait()
 	defer claimer.wait()
 	defer cancelAll()
@@ -599,7 +611,7 @@ func loop(ctx context.Context, cfg *Config, rc *rest.Client, runner *exec.Runner
 		done[t.round.Slug] = true
 		pruneDone(done, rt, time.Now())
 		rounds++
-		if err := runRound(ctx, cfg, runner, predictor, equitySrc, t, wire); err != nil {
+		if err := runRound(ctx, cfg, runner, predictor, equitySrc, t, wire, ahead); err != nil {
 			if ctx.Err() != nil {
 				logf("종료 — 회차 %d건 운용", rounds)
 				return nil
@@ -633,7 +645,7 @@ func loop(ctx context.Context, cfg *Config, rc *rest.Client, runner *exec.Runner
 
 // runRound 는 회차 하나를 준비하고 운용한다.
 func runRound(ctx context.Context, cfg *Config, runner *exec.Runner, predictor *live.Predictor,
-	equitySrc *live.EquitySource, t *tracked, wire *beatWire) error {
+	equitySrc *live.EquitySource, t *tracked, wire *beatWire, ahead *equityAhead) error {
 
 	r := t.round
 	// Exchange 변종을 여기 찍는다 — **회차마다 다시 정해지는 값이라 회차 줄에
@@ -655,7 +667,7 @@ func runRound(ctx context.Context, cfg *Config, runner *exec.Runner, predictor *
 	logf("회차 %s: p_up %.6f, confidence %.6f (문턱 %.4f), 방향 %s, 자격 %v",
 		r.Slug, frozen.PUp, frozen.Confidence, live.ConfidenceThreshold, frozen.Direction, frozen.Eligible)
 
-	eq, err := readEquity(ctx, equitySrc, cfg)
+	eq, eqAge, err := ahead.read(ctx, equitySrc, cfg, time.Now())
 	if err != nil {
 		// **equity 를 모르면 걸지 않는다.** 0 으로 두면 risk 가 전부 0 을
 		// 돌려주므로 결과는 같지만, 그 사실이 로그에 남아야 한다.
@@ -668,7 +680,15 @@ func runRound(ctx context.Context, cfg *Config, runner *exec.Runner, predictor *
 		wire.Report(snapshotInput{Round: r, Frozen: frozen})
 		return nil
 	}
-	logf("회차 %s: equity %.4f USDT, cap %.4f USDT", r.Slug, eq.Total(), risk.Cap(eq))
+	// **나이를 반드시 찍는다.** 미리 받아 둔 값을 쓰면 그 사실이 로그에
+	// 없으면 안 된다 — 어느 회차가 몇 초 묵은 자본으로 사이징됐는지 사후에
+	// 답할 수 있어야 한다(equityahead.go).
+	if eqAge > 0 {
+		logf("회차 %s: equity %.4f USDT, cap %.4f USDT (미리 받아 둔 값, %s 묵음)",
+			r.Slug, eq.Total(), risk.Cap(eq), eqAge.Truncate(time.Second))
+	} else {
+		logf("회차 %s: equity %.4f USDT, cap %.4f USDT", r.Slug, eq.Total(), risk.Cap(eq))
+	}
 
 	runner.Book = t.book
 	// 회차 맥락을 감시에 올린다. 이후 exec 의 관측이 이 맥락 위에 얹힌다 —

@@ -4,11 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"sort"
 	"strconv"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/kdm000718/GLD-9.1/internal/features"
@@ -191,9 +195,15 @@ type fetchRecord struct {
 }
 
 // fakeFetch 는 요청을 기록하고 합성 봉을 돌려준다. **바이낸스를 부르지 않는다.**
+//
+// Freeze 가 1분봉·5분봉을 **동시에** 부르므로(2026-08-14) 이 클로저는 두
+// 고루틴에서 함께 불린다. 뮤텍스 없이 슬라이스에 붙이면 -race 가 잡는다.
 func fakeFetch(rec *[]fetchRecord) FetchKlines {
+	var mu sync.Mutex
 	return func(ctx context.Context, symbol, interval string, startMS, endMS int64) ([]klines.Kline, error) {
+		mu.Lock()
 		*rec = append(*rec, fetchRecord{symbol, interval, startMS, endMS})
+		mu.Unlock()
 		return synthKlines(interval, startMS, endMS), nil
 	}
 }
@@ -513,10 +523,15 @@ func TestLoadBarsRejectsEmptyResponse(t *testing.T) {
 // 않는다. 주입한 Fetch 로만 시험하면 "테스트는 통과하는데 실거래에서는 봉을
 // 못 받는" 상태가 만들어진다.
 func TestFreezeUsesKlinesFetchByDefault(t *testing.T) {
+	// 두 조회가 **동시에** 나가므로 핸들러가 병렬로 불린다(2026-08-14).
+	// 뮤텍스 없이 슬라이스에 붙이면 -race 가 잡는다.
+	var mu sync.Mutex
 	var paths []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query()
+		mu.Lock()
 		paths = append(paths, q.Get("interval"))
+		mu.Unlock()
 		start, _ := strconv.ParseInt(q.Get("startTime"), 10, 64)
 		end, _ := strconv.ParseInt(q.Get("endTime"), 10, 64)
 		if q.Get("symbol") != DefaultSymbol {
@@ -559,7 +574,71 @@ func TestFreezeUsesKlinesFetchByDefault(t *testing.T) {
 	if f.PUp != model.Sigmoid(0.5) {
 		t.Errorf("p_up = %v", f.PUp)
 	}
-	if len(paths) != 2 || paths[0] != "1m" || paths[1] != "5m" {
-		t.Errorf("요청한 인터벌 %v, 기대 [1m 5m]", paths)
+	// **순서는 단정하지 않는다.** 동시에 부르므로 도착 순서가 매번 다르다.
+	// 중요한 것은 둘 다 정확히 한 번씩 나갔다는 것이다.
+	mu.Lock()
+	got := append([]string(nil), paths...)
+	mu.Unlock()
+	sort.Strings(got)
+	if len(got) != 2 || got[0] != "1m" || got[1] != "5m" {
+		t.Errorf("요청한 인터벌 %v, 기대 1m·5m 각 한 번", got)
+	}
+}
+
+// --- 동시 조회의 실패 처리 (2026-08-14) ---
+//
+// 1분봉·5분봉을 동시에 부르게 되면서 실패 처리가 두 갈래가 됐다. 한쪽만
+// 실패하는 경우를 시험하지 않으면 `if err != nil` 하나를 지워도 전부
+// 통과한다 — 실제로 변이 시험에서 그랬다(P1·P2).
+//
+// **틀리는 방향이 중요하다.** 봉을 못 받았는데 동결이 성공하면, 그 회차는
+// 빠진 데이터로 만든 피처에 베팅한다.
+func TestFreezeFailsWhenEitherFetchFails(t *testing.T) {
+	for _, bad := range []string{"1m", "5m"} {
+		t.Run(bad+" 실패", func(t *testing.T) {
+			var mu sync.Mutex
+			var called []string
+			fetch := func(_ context.Context, symbol, interval string, startMS, endMS int64) ([]klines.Kline, error) {
+				mu.Lock()
+				called = append(called, interval)
+				mu.Unlock()
+				if interval == bad {
+					return nil, errors.New("거래소가 응답하지 않는다")
+				}
+				return synthKlines(interval, startMS, endMS), nil
+			}
+			p := &Predictor{Model: zeroModel(0.5), Fetch: fetch}
+			_, err := p.Freeze(context.Background(), roundT)
+			if err == nil {
+				t.Fatalf("%s 조회가 실패했는데 동결이 성공했다 — 빠진 데이터로 베팅한다", bad)
+			}
+			if !strings.Contains(err.Error(), bad) {
+				t.Errorf("에러가 어느 봉인지 말하지 않는다: %v", err)
+			}
+			// 다른 쪽도 실제로 나갔어야 한다. 순차로 되돌아가면 1분봉이
+			// 실패했을 때 5분봉은 아예 요청되지 않는다.
+			mu.Lock()
+			n := len(called)
+			mu.Unlock()
+			if n != 2 {
+				t.Errorf("조회 %d회, 기대 2회 — 동시에 부르지 않았다(%v)", n, called)
+			}
+		})
+	}
+}
+
+// 둘 다 실패하면 1분봉 에러를 먼저 보여 준다. 예전 순차 코드의 순서를
+// 유지한다 — 로그를 읽는 사람이 같은 문구를 기대한다.
+func TestFreezeReportsTheOneMinuteErrorFirst(t *testing.T) {
+	fetch := func(_ context.Context, _, interval string, _, _ int64) ([]klines.Kline, error) {
+		return nil, fmt.Errorf("%s 쪽 실패", interval)
+	}
+	p := &Predictor{Model: zeroModel(0.5), Fetch: fetch}
+	_, err := p.Freeze(context.Background(), roundT)
+	if err == nil {
+		t.Fatal("둘 다 실패했는데 동결이 성공했다")
+	}
+	if !strings.Contains(err.Error(), "1m") {
+		t.Errorf("1분봉 에러가 먼저 나와야 한다: %v", err)
 	}
 }
