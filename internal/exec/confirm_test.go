@@ -262,13 +262,13 @@ func TestNewOrderBaselinesOnConfirmedFills(t *testing.T) {
 	h.r.resolveConfirming(context.Background(), h.st, now)
 
 	// 새 주문. 기준점은 "지금까지 아는 체결" 이어야 한다.
-	h.st.live = &openOrder{id: "o2", shares: 8, notional: 3.92, filledBefore: h.st.filledSharesKnown()}
+	h.st.live = []*openOrder{{id: "o2", shares: 8, notional: 3.92, filledBefore: h.st.filledSharesKnown()}}
 
 	// 앞 주문의 8주가 이제 피드로 도착한다.
 	h.st.filledShares += 8
 	h.st.retireFullyFilled()
 
-	if h.st.live == nil {
+	if len(h.st.live) == 0 {
 		t.Fatal("한 주도 안 찬 주문이 전량 체결로 물러났다 — 아무도 그것을 취소하지 않는다")
 	}
 }
@@ -355,19 +355,19 @@ func TestUnresolvedOrderDoesNotRetireTheNextOne(t *testing.T) {
 	if _, err := h.r.transmit(context.Background(), h.st, req, now); err != nil {
 		t.Fatalf("transmit: %v", err)
 	}
-	if h.st.live == nil {
+	if len(h.st.live) == 0 {
 		t.Fatal("주문이 걸리지 않았다")
 	}
-	if h.st.live.filledBefore != 10 {
+	if h.st.live[0].filledBefore != 10 {
 		t.Fatalf("새 주문의 기준점 %v, want 10 (확인 대기 A 의 10주를 포함해야 한다)",
-			h.st.live.filledBefore)
+			h.st.live[0].filledBefore)
 	}
 
 	// A 의 10주가 피드로 도착한다.
 	h.st.filledShares += 10
 	h.st.retireFullyFilled()
 
-	if h.st.live == nil {
+	if len(h.st.live) == 0 {
 		t.Fatal("한 주도 안 찬 B 가 전량 체결로 물러났다 — 아무도 B 를 취소하지 않는다")
 	}
 }

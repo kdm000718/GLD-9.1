@@ -197,23 +197,45 @@ func TestBuildFailuresAreRetrySafe(t *testing.T) {
 	}
 }
 
-// 0.5 이상에는 절대 걸지 않는다(사용자 제약). quote 가 이미 지키지만 서명
-// 직전이 주문이 되기 전 마지막 관문이다 — 여기가 뚫리면 상한을 넘긴 주문에
-// 서명이 붙는다.
-func TestBuildRefusesTicksAtOrAboveHalf(t *testing.T) {
+// 1.00 이상에는 절대 걸지 않는다. 이진 시장에서 결과 토큰의 최대 지급액이
+// 1.00 이므로 그 이상에 사면 **이기고도 손해**다 — 어떤 전략에서도 실수다.
+// 서명 직전이 주문이 되기 전 마지막 관문이다.
+//
+// # 여기 있던 0.5 상한은 2026-08-14 에 풀렸다
+//
+// 그날 주문이 두 다리가 됐고, 테이커 다리는 최우선 매도호가 그대로 건다.
+// 실측 220 회차 중 61% 가 0.50 초과였으므로 0.49 로 자르면 그 회차들에서
+// 관통이 관통이 아니라 그냥 대기 주문이 된다(사용자 결정: "푼다 — 호가 그대로
+// 관통"). **메이커 다리의 0.5 제약은 exec.limitTick 에 그대로 살아 있다.**
+func TestBuildRefusesTicksAtOrAboveOne(t *testing.T) {
 	s := testSender(t, false, forbiddenServer(t))
-	for _, tick := range []int64{50, 60, 99} {
+	for _, tick := range []int64{100, 101, 250} {
 		r := testRequest()
 		r.Tick = order.NewTick(tick, 2)
 		if _, _, err := s.build(r); err == nil {
-			t.Errorf("틱 %d(0.5 이상)에 서명했다", tick)
+			t.Errorf("틱 %d(1.00 이상)에 서명했다 — 이기고도 손해인 가격이다", tick)
 		}
 	}
-	// 상한 자체(0.49)는 통과한다.
+	// 상한 자체(0.99)는 통과한다.
 	r := testRequest()
-	r.Tick = order.NewTick(49, 2)
+	r.Tick = order.NewTick(99, 2)
 	if _, _, err := s.build(r); err != nil {
-		t.Errorf("상한 틱 49 를 막았다: %v", err)
+		t.Errorf("상한 틱 99 를 막았다: %v", err)
+	}
+}
+
+// 테이커 다리가 실제로 쓰는 값 — 0.5 를 넘는 매도호가 — 이 서명까지 간다.
+// 이 시험이 깨지는 날은 0.5 관문이 되살아난 날이고, 그러면 테이커 다리가
+// 조용히 대기 주문으로 바뀐다.
+func TestBuildAllowsTakerTicksAboveHalf(t *testing.T) {
+	s := testSender(t, false, forbiddenServer(t))
+	// 실측 분포의 중앙(0.51)부터 관측된 최댓값(0.64)까지.
+	for _, tick := range []int64{50, 51, 55, 64} {
+		r := testRequest()
+		r.Tick = order.NewTick(tick, 2)
+		if _, _, err := s.build(r); err != nil {
+			t.Errorf("틱 %d 를 막았다 — 테이커 다리가 걸지 못한다: %v", tick, err)
+		}
 	}
 }
 

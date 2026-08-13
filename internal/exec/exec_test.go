@@ -200,6 +200,58 @@ func (f *fakeOrders) createdTicks() []int64 {
 	return out
 }
 
+// createsAtTick 은 그 틱으로 나간 주문 생성 시도 횟수다.
+//
+// 다리가 둘이 되면서 "주문 생성 몇 회" 만으로는 재시도 규약을 말할 수 없게
+// 됐다 — 한 다리의 재시도와 다른 다리의 첫 시도가 같은 숫자에 섞인다.
+// 틱이 다리를 가른다(테이커는 매도호가, 메이커는 [LimitPrice]).
+// firstCreateStep 은 첫 주문 생성이 일어난 바퀴다. 없었으면 매우 큰 값.
+func (f *fakeOrders) firstCreateStep() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.createSteps) == 0 {
+		return 1 << 30
+	}
+	return f.createSteps[0]
+}
+
+func (f *fakeOrders) createsAtTick(v int64) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, r := range f.creates {
+		if r.Tick.V == v {
+			n++
+		}
+	}
+	return n
+}
+
+// stepsAtTick 은 그 틱의 주문이 나간 스텝 번호들이다. 재시도 간격을 잰다.
+func (f *fakeOrders) stepsAtTick(v int64) []int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []int
+	for i, r := range f.creates {
+		if r.Tick.V == v {
+			out = append(out, f.createSteps[i])
+		}
+	}
+	return out
+}
+
+// createdNotionals 는 나간 주문의 명목이다. 다리마다 예산이 따로라 크기를
+// 보는 시험이 필요하다.
+func (f *fakeOrders) createdNotionals() []float64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]float64, len(f.creates))
+	for i, r := range f.creates {
+		out[i] = r.Notional()
+	}
+	return out
+}
+
 func (f *fakeOrders) removeCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -211,12 +263,37 @@ type fakeFills struct {
 	mu     sync.Mutex
 	pollFn func(n int) ([]ledger.Fill, error)
 	polls  int
+	// step 은 지금 몇 번째 루프 바퀴인지 준다. 체결 조회와 주문 생성의
+	// **순서**를 재는 데 쓴다 — 첫 바퀴 조회를 건너뛰는 최적화의 계약이
+	// "주문이 조회보다 먼저" 이기 때문이다.
+	step      func() int
+	pollSteps []int
+}
+
+func (f *fakeFills) pollCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.polls
+}
+
+// firstPollStep 은 첫 체결 조회가 일어난 바퀴다. 한 번도 없었으면 매우 큰 값 —
+// "주문보다 뒤" 로 비교되게 한다.
+func (f *fakeFills) firstPollStep() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.pollSteps) == 0 {
+		return 1 << 30
+	}
+	return f.pollSteps[0]
 }
 
 func (f *fakeFills) Poll(_ context.Context, _ live.Round) ([]ledger.Fill, error) {
 	f.mu.Lock()
 	n := f.polls
 	f.polls++
+	if f.step != nil {
+		f.pollSteps = append(f.pollSteps, f.step())
+	}
 	fn := f.pollFn
 	f.mu.Unlock()
 	if fn != nil {
@@ -312,6 +389,7 @@ func newHarness(t *testing.T) *harness {
 		Eligible:   true,
 	}
 	h.orders.step = func() int { return h.steps }
+	h.fills.step = func() int { return h.steps }
 	h.runner = &Runner{
 		Book:       h.book,
 		Orders:     h.orders,
@@ -421,44 +499,80 @@ func (h *harness) run() error {
 // (1) 회차마다 한 번, 한 가격
 // ---------------------------------------------------------------------------
 
-// 이 봇의 전부다: 회차 시작에 LimitPrice 로 한 건 걸고, 끝날 때까지 그대로 둔다.
-func TestRoundPlacesExactlyOneOrderAtTheLimitPrice(t *testing.T) {
-	h := newHarness(t)
+// 이 봇의 전부다: 회차 시작에 **다리 둘**을 걸고, 끝날 때까지 그대로 둔다.
+//
+//	테이커   최우선 매도호가 그대로 — 즉시 관통해 체결된다
+//	메이커   LimitPrice(0.46) — 시장이 내려와야 체결된다
+//
+// 순서가 중요하다. 테이커가 먼저 걸려야 retireFullyFilled 의 귀속 순서가
+// 실제 체결 순서와 맞는다.
+func TestRoundPlacesBothLegs(t *testing.T) {
+	h := newHarness(t) // 매도호가 0.60
 	if err := h.run(); err != nil {
 		t.Fatalf("RunRound: %v", err)
 	}
 	ticks := h.orders.createdTicks()
-	if len(ticks) != 1 {
-		t.Fatalf("주문 %d건 (틱 %v) — 회차당 한 건이어야 한다", len(ticks), ticks)
+	if len(ticks) != 2 {
+		t.Fatalf("주문 %d건 (틱 %v) — 회차당 두 건(테이커+메이커)이어야 한다", len(ticks), ticks)
 	}
-	if ticks[0] != 47 {
-		t.Errorf("주문 틱 %d, 기대 47 (=%v)", ticks[0], LimitPrice)
+	if ticks[0] != 60 {
+		t.Errorf("첫 주문 틱 %d, 기대 60 (최우선 매도호가 그대로 관통)", ticks[0])
+	}
+	if ticks[1] != 46 {
+		t.Errorf("둘째 주문 틱 %d, 기대 46 (=%v)", ticks[1], LimitPrice)
 	}
 }
 
-// **군중이 어디로 가든 주문은 그대로다.** 예전 봇은 최우선 매수호가를 따라
-// 다녔다 — 그 경로가 남아 있으면 이 테스트가 잡는다.
-func TestCrowdMovesButTheOrderDoesNot(t *testing.T) {
+// **두 다리의 명목 합이 회차 상한 미만이어야 한다.** 각 다리는 cap 의 절반을
+// 쓴다(2026-08-14 사용자 결정). 한쪽이 예산을 다 먹으면 다른 쪽이 굶고, 둘 다
+// 안 굶으면서 합이 cap 을 넘으면 사용자 제약이 깨진다.
+func TestLegsSplitTheCap(t *testing.T) {
+	h := newHarness(t) // equity 100 → cap 4.55, 다리당 2.275
+	if err := h.run(); err != nil {
+		t.Fatalf("RunRound: %v", err)
+	}
+	ns := h.orders.createdNotionals()
+	if len(ns) != 2 {
+		t.Fatalf("주문 %d건, 기대 2건", len(ns))
+	}
+	cap := risk.Cap(h.equity)
+	for i, n := range ns {
+		if n >= cap*legFraction {
+			t.Errorf("다리 %d 명목 %.4f — 몫 %.4f 미만이어야 한다", i, n, cap*legFraction)
+		}
+	}
+	if total := ns[0] + ns[1]; total >= cap {
+		t.Errorf("명목 합 %.4f 가 cap %.4f 이상이다 — 사용자 제약은 미만이다", total, cap)
+	}
+}
+
+// **메이커 다리는 군중이 어디로 가든 그대로다.** 예전 봇은 최우선 매수호가를
+// 따라 다녔다 — 그 경로가 남아 있으면 이 테스트가 잡는다.
+//
+// 테이커 다리는 반대로 시장이 정한다. 그러나 그 값도 **첫 시도 때 한 번** 읽고
+// 얼린다 — 재호가는 여전히 없다.
+func TestCrowdMovesButTheOrdersDoNot(t *testing.T) {
 	h := newHarness(t)
 	// 위로도 아래로도, 0.5 위로도 움직여 본다. 예전 로직이라면 각각 다른
 	// 목표가를 냈을 자리다(추종 → 상한 → 추종).
 	h.onStep = func(step int) {
 		switch step {
 		case 1:
-			h.setCrowd(map[float64]float64{0.30: 100}, map[float64]float64{0.60: 100})
+			h.setCrowd(map[float64]float64{0.30: 100}, map[float64]float64{0.61: 100})
 		case 3:
-			h.setCrowd(map[float64]float64{0.55: 100}, map[float64]float64{0.60: 100})
+			h.setCrowd(map[float64]float64{0.55: 100}, map[float64]float64{0.62: 100})
 		case 5:
-			h.setCrowd(map[float64]float64{0.41: 100}, map[float64]float64{0.60: 100})
+			h.setCrowd(map[float64]float64{0.41: 100}, map[float64]float64{0.63: 100})
 		case 7:
-			h.setCrowd(map[float64]float64{0.49: 100}, map[float64]float64{0.60: 100})
+			h.setCrowd(map[float64]float64{0.49: 100}, map[float64]float64{0.64: 100})
 		}
 	}
 	if err := h.run(); err != nil {
 		t.Fatalf("RunRound: %v", err)
 	}
-	if ticks := h.orders.createdTicks(); len(ticks) != 1 || ticks[0] != 47 {
-		t.Errorf("주문 틱 %v — 군중을 따라갔다. 이 봇은 회차당 47 한 건만 낸다", ticks)
+	ticks := h.orders.createdTicks()
+	if len(ticks) != 2 || ticks[0] != 60 || ticks[1] != 46 {
+		t.Errorf("주문 틱 %v, 기대 [60 46] — 군중을 따라갔다. 다리는 회차당 각 한 건뿐이다", ticks)
 	}
 	// 취소는 회차 종료 한 번뿐이다. 그보다 많으면 옮긴 것이다.
 	if n := h.orders.removeCount(); n != 1 {
@@ -466,8 +580,8 @@ func TestCrowdMovesButTheOrderDoesNot(t *testing.T) {
 	}
 }
 
-// **관통 방지가 없다.** 매도호가가 0.47 이하라도 그대로 건다 — 즉시 체결되고
-// 테이커 수수료 2% 를 문다. 2026-08-12 사용자 결정이고, 알고 고른 손실이다.
+// **메이커 다리에도 관통 방지가 없다.** 매도호가가 0.46 이하라도 그대로 건다 —
+// 즉시 체결되고 테이커 수수료 2% 를 문다. 2026-08-12 사용자 결정이다.
 //
 // 이 테스트가 깨지는 날은 누군가 관통 방지를 되살린 날이고, 그것은 전략
 // 변경이므로 조용히 지나가면 안 된다.
@@ -478,18 +592,18 @@ func TestOrderGoesOutEvenWhenItCrossesTheAsk(t *testing.T) {
 		t.Fatalf("RunRound: %v", err)
 	}
 	ticks := h.orders.createdTicks()
-	if len(ticks) != 1 || ticks[0] != 47 {
-		t.Errorf("주문 틱 %v, 기대 [47] — 매도호가 0.40 을 피해 내려갔다면 관통 방지가 되살아난 것이다", ticks)
+	if len(ticks) != 2 || ticks[1] != 46 {
+		t.Errorf("주문 틱 %v, 기대 [40 46] — 메이커가 매도호가 0.40 을 피해 내려갔다면 관통 방지가 되살아난 것이다", ticks)
 	}
 }
 
-// 지정가 틱은 정밀도에서 유도한다. 리터럴 47 을 박으면 precision 3 인 마켓에서
-// 0.047 에 걸린다 — 열 배 싼 가격이고, 채워지지 않는다.
+// 지정가 틱은 정밀도에서 유도한다. 리터럴 46 을 박으면 precision 3 인 마켓에서
+// 0.046 에 걸린다 — 열 배 싼 가격이고, 채워지지 않는다.
 func TestLimitTickComesFromThePrecision(t *testing.T) {
 	for _, c := range []struct {
 		precision int
 		want      int64
-	}{{2, 47}, {3, 470}, {4, 4700}, {18, 470_000_000_000_000_000}} {
+	}{{2, 46}, {3, 460}, {4, 4600}, {18, 460_000_000_000_000_000}} {
 		got, err := limitTick(c.precision)
 		if err != nil {
 			t.Fatalf("precision %d: %v", c.precision, err)
@@ -557,8 +671,8 @@ func TestInsideTheWindowStillPlaces(t *testing.T) {
 	if err := h.run(); err != nil {
 		t.Fatalf("RunRound: %v", err)
 	}
-	if n := h.orders.createdCount(); n != 1 {
-		t.Errorf("주문 %d건, 기대 1건 — 창 안인데 걸지 않았다", n)
+	if n := h.orders.createdCount(); n != 2 {
+		t.Errorf("주문 %d건, 기대 2건(테이커+메이커) — 창 안인데 걸지 않았다", n)
 	}
 }
 
@@ -592,8 +706,8 @@ func TestRetriesRespectTheWindow(t *testing.T) {
 	h := newHarness(t)
 	h.runner.EntryWindow = 200 * time.Millisecond
 	h.runner.RejectBackoff = 300 * time.Millisecond // 다음 시도는 창 밖이다
-	h.orders.createFn = func(n int, _ Request) (CreateResult, error) {
-		if n == 0 {
+	h.orders.createFn = func(n int, r Request) (CreateResult, error) {
+		if r.Tick.V == 46 {
 			return CreateResult{}, &fakeOrderError{safe: true, msg: "거래소 거부"}
 		}
 		id := fmt.Sprintf("ord-%d", n)
@@ -602,8 +716,10 @@ func TestRetriesRespectTheWindow(t *testing.T) {
 	if err := h.run(); err != nil {
 		t.Fatalf("RunRound: %v", err)
 	}
-	if n := h.orders.createdCount(); n != 1 {
-		t.Errorf("주문 생성 %d회, 기대 1회 — 재시도가 창을 넘어갔다", n)
+	// 첫 바퀴에 두 다리를 두드렸고, 메이커는 거부당했다. 백오프 뒤 재시도는
+	// 창 밖이므로 다시 나가면 안 된다.
+	if n := h.orders.createsAtTick(46); n != 1 {
+		t.Errorf("메이커 다리 주문 생성 %d회, 기대 1회 — 재시도가 창을 넘어갔다", n)
 	}
 }
 
@@ -812,8 +928,8 @@ func TestInvalidRecordSkipsLineButKeepsExposure(t *testing.T) {
 	if err := h.run(); err != nil {
 		t.Fatalf("ErrInvalidRecord 로 회차가 죽었다: %v", err)
 	}
-	if n := h.orders.createdCount(); n != 1 {
-		t.Errorf("주문 %d건 — 기대 1건. 기록하지 못한 체결도 노출에 남아야 한다", n)
+	if n := h.orders.createdCount(); n != 2 {
+		t.Errorf("주문 %d건 — 기대 2건. 기록하지 못한 체결도 노출에 남아야 한다", n)
 	}
 }
 
@@ -825,15 +941,17 @@ func TestInvalidRecordSkipsLineButKeepsExposure(t *testing.T) {
 func TestUnknownCreateIsNeverRetried(t *testing.T) {
 	h := newHarness(t)
 	unknown := &fakeOrderError{safe: false, msg: "결과 불명"}
-	h.orders.createFn = func(n int, _ Request) (CreateResult, error) {
-		if n == 0 {
+	// 메이커 다리만 불명으로 만든다. 다리별로 봐야 한 다리의 재시도와 다른
+	// 다리의 첫 시도가 같은 숫자에 섞이지 않는다.
+	h.orders.createFn = func(n int, r Request) (CreateResult, error) {
+		if r.Tick.V == 46 {
 			return CreateResult{}, unknown
 		}
 		return CreateResult{ID: fmt.Sprintf("ord-%d", n)}, nil
 	}
 	err := h.run()
-	if n := h.orders.createdCount(); n != 1 {
-		t.Errorf("주문 생성 %d회 — 결과 불명 주문을 다시 보내면 둘이 들어간다", n)
+	if n := h.orders.createsAtTick(46); n != 1 {
+		t.Errorf("메이커 다리 주문 생성 %d회 — 결과 불명 주문을 다시 보내면 둘이 들어간다", n)
 	}
 	// 식별자가 없으니 취소도 못 한다. 그 명목은 회차 끝까지 노출에 남고,
 	// 회차가 끝나면 사람이 확인해야 한다 — 조용히 성공하면 안 된다.
@@ -851,9 +969,9 @@ func TestUnknownCreateWithIDIsCancelledNotResent(t *testing.T) {
 	// 해시를 함께 준다 — 응답은 파싱됐는데 분류가 "불명" 인 경우다. 해시가
 	// 있어야 취소 확인 뒤 **얼마나 찼는지 물어볼 수 있고**, 그래야 명목이
 	// 풀린다. 해시가 없는 경우는 TestNoHashKeepsTheNotionalReserved 가 본다.
-	h.orders.createFn = func(n int, _ Request) (CreateResult, error) {
+	h.orders.createFn = func(n int, r Request) (CreateResult, error) {
 		id := fmt.Sprintf("ord-%d", n)
-		if n == 0 {
+		if r.Tick.V == 46 {
 			return CreateResult{ID: id, Hash: "hash-" + id}, &fakeOrderError{safe: false, msg: "결과 불명"}
 		}
 		return CreateResult{ID: id, Hash: "hash-" + id}, nil
@@ -864,10 +982,10 @@ func TestUnknownCreateWithIDIsCancelledNotResent(t *testing.T) {
 	if n := h.orders.removeCount(); n == 0 {
 		t.Fatal("식별자가 있는데 취소를 시도하지 않았다")
 	}
-	// **다시 걸지 않는다.** 그 주문은 살아 있을 수 있고, 회차당 한 건이
+	// **다시 걸지 않는다.** 그 주문은 살아 있을 수 있고, 다리당 한 건이
 	// 이 봇의 규약이다.
-	if n := h.orders.createdCount(); n != 1 {
-		t.Errorf("주문 생성 %d회 — 결과 불명 주문을 두고 또 걸면 노출이 두 배다", n)
+	if n := h.orders.createsAtTick(46); n != 1 {
+		t.Errorf("메이커 다리 주문 생성 %d회 — 결과 불명 주문을 두고 또 걸면 노출이 두 배다", n)
 	}
 }
 
@@ -876,8 +994,10 @@ func TestUnknownCreateWithIDIsCancelledNotResent(t *testing.T) {
 // 하나로 회차를 통째로 버릴 이유도 없다.
 func TestRejectedCreateMayBeRetried(t *testing.T) {
 	h := newHarness(t)
-	h.orders.createFn = func(n int, _ Request) (CreateResult, error) {
-		if n == 0 {
+	first := true
+	h.orders.createFn = func(n int, r Request) (CreateResult, error) {
+		if r.Tick.V == 46 && first {
+			first = false
 			return CreateResult{}, &fakeOrderError{safe: true, msg: "거래소 거부"}
 		}
 		id := fmt.Sprintf("ord-%d", n)
@@ -886,14 +1006,16 @@ func TestRejectedCreateMayBeRetried(t *testing.T) {
 	if err := h.run(); err != nil {
 		t.Fatalf("RunRound: %v", err)
 	}
-	if n := h.orders.createdCount(); n != 2 {
-		t.Errorf("주문 생성 %d회, 기대 2회 — 거부 1회 뒤 성공 1회", n)
+	if n := h.orders.createsAtTick(46); n != 2 {
+		t.Errorf("메이커 다리 주문 생성 %d회, 기대 2회 — 거부 1회 뒤 성공 1회", n)
 	}
 	// 그리고 곧바로 다시 두드리지 않는다. 루프 주기가 50~100ms 라 백오프가
 	// 없으면 회차 하나가 240 req/min 예산을 통째로 태운다.
-	h.orders.mu.Lock()
-	defer h.orders.mu.Unlock()
-	if gap := h.orders.createSteps[1] - h.orders.createSteps[0]; gap < 5 {
+	steps := h.orders.stepsAtTick(46)
+	if len(steps) < 2 {
+		t.Fatalf("메이커 다리가 %d회만 나갔다", len(steps))
+	}
+	if gap := steps[1] - steps[0]; gap < 5 {
 		t.Errorf("재시도 간격이 %d스텝(=%dms)이다 — 기본 백오프 500ms 를 지키지 않았다", gap, gap*100)
 	}
 }
@@ -909,16 +1031,20 @@ func TestRetriesAreBounded(t *testing.T) {
 	if err := h.run(); err != nil {
 		t.Fatalf("RunRound: %v", err)
 	}
-	if n := h.orders.createdCount(); n != maxPlaceAttempts {
-		t.Errorf("주문 생성 시도 %d회, 기대 %d회", n, maxPlaceAttempts)
+	// 다리마다 상한을 따로 쓰는 것이 아니라, 시도 한 바퀴가 두 다리를 함께
+	// 두드린다 — 그래서 다리별로 정확히 maxPlaceAttempts 회다.
+	for _, tick := range []int64{60, 46} {
+		if n := h.orders.createsAtTick(tick); n != maxPlaceAttempts {
+			t.Errorf("틱 %d 주문 생성 시도 %d회, 기대 %d회", tick, n, maxPlaceAttempts)
+		}
 	}
 }
 
 // 분류 불가 에러는 "모른다"로 다룬다 — 이중 주문을 막는 쪽.
 func TestUnclassifiedCreateErrorIsTreatedAsUnknown(t *testing.T) {
 	h := newHarness(t)
-	h.orders.createFn = func(n int, _ Request) (CreateResult, error) {
-		if n == 0 {
+	h.orders.createFn = func(n int, r Request) (CreateResult, error) {
+		if r.Tick.V == 46 {
 			return CreateResult{}, errors.New("무엇인지 모르는 실패")
 		}
 		return CreateResult{ID: fmt.Sprintf("ord-%d", n)}, nil
@@ -926,8 +1052,8 @@ func TestUnclassifiedCreateErrorIsTreatedAsUnknown(t *testing.T) {
 	if err := h.run(); err == nil {
 		t.Fatal("분류하지 못한 실패를 안전한 것으로 다뤘다")
 	}
-	if n := h.orders.createdCount(); n != 1 {
-		t.Errorf("주문 생성 %d회 — 분류하지 못한 실패는 '보냈을 수 있다'로 다뤄야 한다", n)
+	if n := h.orders.createsAtTick(46); n != 1 {
+		t.Errorf("메이커 다리 주문 생성 %d회 — 분류하지 못한 실패는 '보냈을 수 있다'로 다뤄야 한다", n)
 	}
 }
 
@@ -1051,8 +1177,8 @@ func TestPendingCancelCountsAsExposure(t *testing.T) {
 	if err := h.run(); err == nil {
 		t.Fatal("취소를 확인하지 못한 채 회차가 끝났는데 에러가 아니다")
 	}
-	if n := h.orders.createdCount(); n != 1 {
-		t.Errorf("주문 %d건 — 회차당 한 건이어야 한다", n)
+	if n := h.orders.createdCount(); n != 2 {
+		t.Errorf("주문 %d건 — 회차당 두 건이어야 한다", n)
 	}
 }
 
@@ -1131,8 +1257,8 @@ func TestLoopCancelsAllAtRoundEnd(t *testing.T) {
 	if err := h.run(); err != nil {
 		t.Fatalf("RunRound: %v", err)
 	}
-	if h.orders.createdCount() != 1 {
-		t.Fatalf("주문 %d건, 기대 1건", h.orders.createdCount())
+	if h.orders.createdCount() != 2 {
+		t.Fatalf("주문 %d건, 기대 2건", h.orders.createdCount())
 	}
 	h.orders.mu.Lock()
 	defer h.orders.mu.Unlock()
@@ -1140,8 +1266,8 @@ func TestLoopCancelsAllAtRoundEnd(t *testing.T) {
 		t.Fatal("회차 종료에 취소가 나가지 않았다")
 	}
 	last := h.orders.removes[len(h.orders.removes)-1]
-	if len(last) != 1 || last[0] != "ord-0" {
-		t.Errorf("마지막 취소 = %v, 기대 [ord-0]", last)
+	if len(last) != 2 || last[0] != "ord-0" || last[1] != "ord-1" {
+		t.Errorf("마지막 취소 = %v, 기대 [ord-0 ord-1] — 두 다리를 함께 거둬야 한다", last)
 	}
 }
 
@@ -1348,14 +1474,14 @@ func TestNaNFillDoesNotKillTheRound(t *testing.T) {
 // 같은 식별자가 두 번 오면 취소 확인 **한 번**이 두 주문의 명목을 함께 빼 준다.
 // 그러면 한도가 조용히 늘어난다.
 //
-// **지금의 루프는 이 상태에 닿지 못한다** — risk.Shares 가 잔여를 거의 다 쓰고
-// 남는 잔여는 언제나 가격보다 작아(≤$1) 두 번째 주문이 성립하지 않기 때문이다.
-// 그래도 가드와 이 테스트를 두는 이유: 사이저가 부분 주문을 허용하도록 바뀌는
-// 순간(예: 큐 위치를 나눠 걸기) 곧바로 열리는 구멍이고, 열려도 아무 신호가
-// 없다. 그래서 루프가 아니라 transmit 을 직접 부른다.
+// **2026-08-14 이전에는 루프가 이 상태에 닿지 못했다** — 회차당 한 건만 걸었고
+// risk.Shares 가 잔여를 거의 다 써서 두 번째 주문이 성립하지 않았기 때문이다.
+// 그 전제가 그날 사라졌다: 이제 회차마다 다리를 둘 걸고, 두 주문이 동시에
+// 살아 있는 것이 정상이다. 거래소가 두 다리에 같은 식별자를 주는 순간 이
+// 가드가 유일한 방어선이 된다.
 func TestDuplicateOrderIDIsNotTracked(t *testing.T) {
 	h := newHarness(t)
-	st := &roundState{live: &openOrder{id: "same", tick: 45, shares: 10, notional: 4.5}}
+	st := &roundState{live: []*openOrder{{id: "same", tick: 45, shares: 10, notional: 4.5}}}
 	h.orders.createFn = func(int, Request) (CreateResult, error) {
 		return CreateResult{ID: "same"}, nil // 거래소가 같은 ID 를 반복한다
 	}
@@ -1366,8 +1492,9 @@ func TestDuplicateOrderIDIsNotTracked(t *testing.T) {
 	if _, err := h.runner.transmit(context.Background(), st, req, h.clk.now()); err != nil {
 		t.Fatalf("transmit: %v", err)
 	}
-	if st.live.id == "same" && st.live.tick == 44 {
-		t.Error("중복 식별자로 살아 있는 주문을 덮어썼다 — 원래 주문을 잊는다")
+	if len(st.live) != 1 || st.live[0].tick != 45 {
+		t.Errorf("살아 있는 주문이 %d건(틱 %v) — 중복 식별자가 추적 목록에 들어갔다",
+			len(st.live), liveTicks(st))
 	}
 	for _, o := range st.pending {
 		if o.id == "same" {
@@ -1781,7 +1908,7 @@ func TestFilledOrderBecomingAPositionDoesNotTriggerAnother(t *testing.T) {
 	creates := append([]Request(nil), h.orders.creates...)
 	h.orders.mu.Unlock()
 
-	if len(creates) != 1 {
+	if len(creates) != 2 {
 		var ticks []int64
 		var sum float64
 		for _, r := range creates {
@@ -1822,10 +1949,91 @@ func TestConfirmedCancelThatActuallyFilledKeepsItsNotional(t *testing.T) {
 	if err := h.run(); err != nil && !isDisarm(err) {
 		t.Fatalf("RunRound: %v", err)
 	}
-	if n := h.orders.createdCount(); n != 1 {
+	if n := h.orders.createdCount(); n != 2 {
 		t.Errorf("주문 %d건 — 취소 확인을 '안 찼다'로 읽고 다시 걸었다", n)
 	}
 	if cap := risk.Cap(h.equity); peak > cap+1e-9 {
 		t.Errorf("노출 최댓값 %.4f > 상한 %.4f", peak, cap)
+	}
+}
+
+// liveTicks 는 살아 있는 주문의 틱 목록이다. 실패 메시지를 읽을 수 있게 한다.
+func liveTicks(st *roundState) []int64 {
+	out := make([]int64, 0, len(st.live))
+	for _, o := range st.live {
+		out = append(out, o.tick)
+	}
+	return out
+}
+
+// ---------------------------------------------------------------------------
+// 첫 바퀴 체결 조회 건너뛰기 (2026-08-14)
+// ---------------------------------------------------------------------------
+//
+// REST 요청 사이에 333ms 가 강제로 끼므로(rest.minInterval), 회차 시작의
+// 세 요청(equity → 체결 조회 → 주문 생성) 중 가운데를 빼면 주문이 그만큼
+// 일찍 나간다. 테이커 다리는 호가창에서 가격을 읽으므로 이 지연이 곧 오차다.
+
+// 회차가 우리 눈앞에서 시작했으면 첫 바퀴 체결 조회를 건너뛴다.
+func TestFirstFillPollIsSkippedWhenWeWatchedTheRoundStart(t *testing.T) {
+	h := newHarness(t)
+	h.runner.StartedAt = h.round.StartsAt.Add(-time.Minute) // 회차보다 먼저 살아 있었다
+	if err := h.run(); err != nil {
+		t.Fatalf("RunRound: %v", err)
+	}
+	if n := h.fills.pollCount(); n == 0 {
+		t.Fatal("체결 조회가 아예 없다 — 두 번째 바퀴부터는 물어야 한다")
+	}
+	// 첫 주문이 첫 조회보다 먼저 나가야 한다. 그게 이 최적화의 전부다.
+	if h.orders.createdCount() == 0 {
+		t.Fatal("주문이 나가지 않았다")
+	}
+	if h.fills.firstPollStep() <= h.orders.firstCreateStep() {
+		t.Errorf("체결 조회(스텝 %d)가 첫 주문(스텝 %d)보다 앞이다 — 건너뛰지 않았다",
+			h.fills.firstPollStep(), h.orders.firstCreateStep())
+	}
+}
+
+// **재시작 구멍.** 직전 프로세스가 이 회차에 주문을 내고 죽었을 수 있다.
+// 새 프로세스의 roundState 는 비어 있지만 거래소에는 우리 체결이 있고, 그것을
+// 못 세면 노출 상한이 그만큼 늘어난다.
+func TestRestartedProcessAlwaysPollsFirst(t *testing.T) {
+	h := newHarness(t)
+	h.runner.StartedAt = h.round.StartsAt.Add(time.Second) // 회차가 시작한 뒤에 기동했다
+	if err := h.run(); err != nil {
+		t.Fatalf("RunRound: %v", err)
+	}
+	if h.fills.firstPollStep() > h.orders.firstCreateStep() {
+		t.Error("재시작한 프로세스가 체결 조회를 건너뛰고 주문했다 — 직전 프로세스의 체결이 노출에서 빠진다")
+	}
+}
+
+// StartedAt 을 배선하지 않았으면 건너뛰지 않는다. 제로값이 "언제나 안전"으로
+// 읽히면 배선을 잊은 날 조용히 구멍이 열린다.
+func TestUnwiredStartedAtNeverSkips(t *testing.T) {
+	h := newHarness(t) // StartedAt 제로
+	if err := h.run(); err != nil {
+		t.Fatalf("RunRound: %v", err)
+	}
+	if h.fills.firstPollStep() > h.orders.firstCreateStep() {
+		t.Error("StartedAt 이 제로인데 건너뛰었다")
+	}
+}
+
+// 늦게 잡힌 회차에서는 묻는다. 그 사이에 무슨 일이 있었는지 알 수 없다.
+func TestLateJoinStillPolls(t *testing.T) {
+	h := newHarness(t)
+	h.runner.StartedAt = h.round.StartsAt.Add(-time.Minute)
+	h.runner.EntryWindow = 5 * time.Second
+	h.clk.advance(3 * time.Second) // 유예 2초를 넘겨 합류
+	h.round.EndsAt = h.round.StartsAt.Add(10 * time.Second)
+	if err := h.run(); err != nil {
+		t.Fatalf("RunRound: %v", err)
+	}
+	if h.fills.pollCount() == 0 {
+		t.Fatal("늦게 합류했는데 체결 조회를 한 번도 하지 않았다")
+	}
+	if h.orders.createdCount() > 0 && h.fills.firstPollStep() > h.orders.firstCreateStep() {
+		t.Error("유예 2초 밖에서 합류했는데 체결 조회를 건너뛰었다")
 	}
 }
