@@ -135,7 +135,7 @@ func TestBookNeverChangesTheMakerLeg(t *testing.T) {
 		{"매수만 높게", map[float64]float64{0.90: 100}, nil},
 		{"매도가 지정가 아래", map[float64]float64{0.10: 100}, map[float64]float64{0.20: 100}},
 		{"매도가 지정가 위", map[float64]float64{0.45: 100}, map[float64]float64{0.80: 100}},
-		{"매도가 지정가와 같음", map[float64]float64{0.20: 100}, map[float64]float64{0.46: 100}},
+		{"매도가 지정가와 같음", map[float64]float64{0.20: 100}, map[float64]float64{0.48: 100}},
 	}
 	for _, dir := range []string{ledger.OutcomeUp, ledger.OutcomeDown} {
 		for _, s := range shapes {
@@ -153,15 +153,15 @@ func TestBookNeverChangesTheMakerLeg(t *testing.T) {
 			h.orders.mu.Unlock()
 
 			// 메이커는 **마지막에 나간 주문**이다(다리 순서: 테이커 → 메이커).
-			// 틱으로 고르면 매도호가가 마침 0.46 인 모양에서 둘이 겹친다.
+			// 틱으로 고르면 매도호가가 마침 지정가인 모양에서 둘이 겹친다.
 			if len(creates) == 0 {
 				t.Fatalf("%s/%s: 주문이 하나도 나가지 않았다", dir, s.name)
 			}
 			maker := creates[len(creates)-1]
-			if maker.Tick.V != 46 {
-				t.Errorf("%s/%s: 메이커 틱 %d, 기대 46 — 책이 가격을 바꿨다", dir, s.name, maker.Tick.V)
+			if maker.Tick.V != limitPriceNum {
+				t.Errorf("%s/%s: 메이커 틱 %d, 기대 %d — 책이 가격을 바꿨다", dir, s.name, maker.Tick.V, limitPriceNum)
 			}
-			// 크기도 책과 무관하다. cap 4.55 의 절반 2.275 / 0.46 → 4주.
+			// 크기도 책과 무관하다. cap 4.55 의 절반 2.275 / 0.48 → 4주.
 			if maker.Shares != 4 {
 				t.Errorf("%s/%s: 메이커 %v주, 기대 4주 — 책이 크기를 바꿨다", dir, s.name, maker.Shares)
 			}
@@ -224,8 +224,8 @@ func TestNoAskMeansNoTakerLeg(t *testing.T) {
 		t.Fatalf("RunRound: %v", err)
 	}
 	ticks := h.orders.createdTicks()
-	if len(ticks) != 1 || ticks[0] != 46 {
-		t.Fatalf("주문 틱 %v, 기대 [46] — 매도호가가 없는데 테이커를 걸었다", ticks)
+	if len(ticks) != 1 || ticks[0] != limitPriceNum {
+		t.Fatalf("주문 틱 %v, 기대 [%d] — 매도호가가 없는데 테이커를 걸었다", ticks, limitPriceNum)
 	}
 	if why == "" {
 		t.Error("테이커 다리를 건너뛴 이유가 로그에 없다 — 처음부터 없었던 회차와 구분되지 않는다")
@@ -241,8 +241,8 @@ func TestStaleBookMeansNoTakerLeg(t *testing.T) {
 		t.Fatalf("RunRound: %v", err)
 	}
 	ticks := h.orders.createdTicks()
-	if len(ticks) != 1 || ticks[0] != 46 {
-		t.Fatalf("주문 틱 %v, 기대 [46] — 낡은 호가창으로 관통했다", ticks)
+	if len(ticks) != 1 || ticks[0] != limitPriceNum {
+		t.Fatalf("주문 틱 %v, 기대 [%d] — 낡은 호가창으로 관통했다", ticks, limitPriceNum)
 	}
 }
 
@@ -283,7 +283,7 @@ func TestLimitTickAgreesWithTheOrderLayer(t *testing.T) {
 			t.Fatalf("precision %d: %v", p, err)
 		}
 		v := mustView(t, ledger.OutcomeUp, p)
-		if got, want := v.label(tk.V, true), "0.46"; got != want {
+		if got, want := v.label(tk.V, true), "0.48"; got != want {
 			t.Errorf("precision %d: 지정가 표기 %q, 기대 %q", p, got, want)
 		}
 		if tk.Precision != p {

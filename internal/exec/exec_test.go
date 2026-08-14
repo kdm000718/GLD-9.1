@@ -502,7 +502,7 @@ func (h *harness) run() error {
 // 이 봇의 전부다: 회차 시작에 **다리 둘**을 걸고, 끝날 때까지 그대로 둔다.
 //
 //	테이커   최우선 매도호가 그대로 — 즉시 관통해 체결된다
-//	메이커   LimitPrice(0.46) — 시장이 내려와야 체결된다
+//	메이커   LimitPrice(0.48) — 시장이 내려와야 체결된다
 //
 // 순서가 중요하다. 테이커가 먼저 걸려야 retireFullyFilled 의 귀속 순서가
 // 실제 체결 순서와 맞는다.
@@ -518,8 +518,8 @@ func TestRoundPlacesBothLegs(t *testing.T) {
 	if ticks[0] != 60 {
 		t.Errorf("첫 주문 틱 %d, 기대 60 (최우선 매도호가 그대로 관통)", ticks[0])
 	}
-	if ticks[1] != 46 {
-		t.Errorf("둘째 주문 틱 %d, 기대 46 (=%v)", ticks[1], LimitPrice)
+	if ticks[1] != limitPriceNum {
+		t.Errorf("둘째 주문 틱 %d, 기대 %d (=%v)", ticks[1], limitPriceNum, LimitPrice)
 	}
 }
 
@@ -571,8 +571,8 @@ func TestCrowdMovesButTheOrdersDoNot(t *testing.T) {
 		t.Fatalf("RunRound: %v", err)
 	}
 	ticks := h.orders.createdTicks()
-	if len(ticks) != 2 || ticks[0] != 60 || ticks[1] != 46 {
-		t.Errorf("주문 틱 %v, 기대 [60 46] — 군중을 따라갔다. 다리는 회차당 각 한 건뿐이다", ticks)
+	if len(ticks) != 2 || ticks[0] != 60 || ticks[1] != limitPriceNum {
+		t.Errorf("주문 틱 %v, 기대 [60 %d] — 군중을 따라갔다. 다리는 회차당 각 한 건뿐이다", ticks, limitPriceNum)
 	}
 	// 취소는 회차 종료 한 번뿐이다. 그보다 많으면 옮긴 것이다.
 	if n := h.orders.removeCount(); n != 1 {
@@ -580,7 +580,7 @@ func TestCrowdMovesButTheOrdersDoNot(t *testing.T) {
 	}
 }
 
-// **메이커 다리에도 관통 방지가 없다.** 매도호가가 0.46 이하라도 그대로 건다 —
+// **메이커 다리에도 관통 방지가 없다.** 매도호가가 지정가 이하라도 그대로 건다 —
 // 즉시 체결되고 테이커 수수료 2% 를 문다. 2026-08-12 사용자 결정이다.
 //
 // 이 테스트가 깨지는 날은 누군가 관통 방지를 되살린 날이고, 그것은 전략
@@ -592,18 +592,18 @@ func TestOrderGoesOutEvenWhenItCrossesTheAsk(t *testing.T) {
 		t.Fatalf("RunRound: %v", err)
 	}
 	ticks := h.orders.createdTicks()
-	if len(ticks) != 2 || ticks[1] != 46 {
-		t.Errorf("주문 틱 %v, 기대 [40 46] — 메이커가 매도호가 0.40 을 피해 내려갔다면 관통 방지가 되살아난 것이다", ticks)
+	if len(ticks) != 2 || ticks[1] != limitPriceNum {
+		t.Errorf("주문 틱 %v, 기대 [40 %d] — 메이커가 매도호가 0.40 을 피해 내려갔다면 관통 방지가 되살아난 것이다", ticks, limitPriceNum)
 	}
 }
 
-// 지정가 틱은 정밀도에서 유도한다. 리터럴 46 을 박으면 precision 3 인 마켓에서
-// 0.046 에 걸린다 — 열 배 싼 가격이고, 채워지지 않는다.
+// 지정가 틱은 정밀도에서 유도한다. 리터럴 48 을 박으면 precision 3 인 마켓에서
+// 0.048 에 걸린다 — 열 배 싼 가격이고, 채워지지 않는다.
 func TestLimitTickComesFromThePrecision(t *testing.T) {
 	for _, c := range []struct {
 		precision int
 		want      int64
-	}{{2, 46}, {3, 460}, {4, 4600}, {18, 460_000_000_000_000_000}} {
+	}{{2, 48}, {3, 480}, {4, 4800}, {18, 480_000_000_000_000_000}} {
 		got, err := limitTick(c.precision)
 		if err != nil {
 			t.Fatalf("precision %d: %v", c.precision, err)
@@ -707,7 +707,7 @@ func TestRetriesRespectTheWindow(t *testing.T) {
 	h.runner.EntryWindow = 200 * time.Millisecond
 	h.runner.RejectBackoff = 300 * time.Millisecond // 다음 시도는 창 밖이다
 	h.orders.createFn = func(n int, r Request) (CreateResult, error) {
-		if r.Tick.V == 46 {
+		if r.Tick.V == limitPriceNum {
 			return CreateResult{}, &fakeOrderError{safe: true, msg: "거래소 거부"}
 		}
 		id := fmt.Sprintf("ord-%d", n)
@@ -718,7 +718,7 @@ func TestRetriesRespectTheWindow(t *testing.T) {
 	}
 	// 첫 바퀴에 두 다리를 두드렸고, 메이커는 거부당했다. 백오프 뒤 재시도는
 	// 창 밖이므로 다시 나가면 안 된다.
-	if n := h.orders.createsAtTick(46); n != 1 {
+	if n := h.orders.createsAtTick(limitPriceNum); n != 1 {
 		t.Errorf("메이커 다리 주문 생성 %d회, 기대 1회 — 재시도가 창을 넘어갔다", n)
 	}
 }
@@ -733,6 +733,22 @@ func TestEntryWindowMustBeSet(t *testing.T) {
 	}
 	if h.orders.createdCount() != 0 {
 		t.Error("EntryWindow 가 0 인데 주문이 나갔다")
+	}
+}
+
+// 메이커 지정가는 **사용자가 정한 값**이다. 나머지 시험들은 전부 상수를 참조하기
+// 때문에, 상수 자체가 바뀌면 그 시험들은 새 값에 맞춰 조용히 통과한다. 여기 한
+// 줄만이 "그 값이 얼마인가" 를 못박는다 — 이 시험이 깨지는 날은 전략이 바뀐
+// 날이고, 그것은 조용히 지나가면 안 된다.
+//
+// 값의 이력은 [LimitPrice] 의 주석에 있다.
+func TestMakerLimitPriceIsWhatTheUserChose(t *testing.T) {
+	const want = 0.48
+	if LimitPrice != want {
+		t.Fatalf("LimitPrice = %v, 사용자가 정한 값은 %v — 전략이 바뀌었다면 이 줄을 함께 고쳐라", LimitPrice, want)
+	}
+	if limitPriceNum != 48 || limitPriceDen != 100 {
+		t.Fatalf("지정가 %d/%d — 48/100 이어야 한다", limitPriceNum, limitPriceDen)
 	}
 }
 
@@ -944,13 +960,13 @@ func TestUnknownCreateIsNeverRetried(t *testing.T) {
 	// 메이커 다리만 불명으로 만든다. 다리별로 봐야 한 다리의 재시도와 다른
 	// 다리의 첫 시도가 같은 숫자에 섞이지 않는다.
 	h.orders.createFn = func(n int, r Request) (CreateResult, error) {
-		if r.Tick.V == 46 {
+		if r.Tick.V == limitPriceNum {
 			return CreateResult{}, unknown
 		}
 		return CreateResult{ID: fmt.Sprintf("ord-%d", n)}, nil
 	}
 	err := h.run()
-	if n := h.orders.createsAtTick(46); n != 1 {
+	if n := h.orders.createsAtTick(limitPriceNum); n != 1 {
 		t.Errorf("메이커 다리 주문 생성 %d회 — 결과 불명 주문을 다시 보내면 둘이 들어간다", n)
 	}
 	// 식별자가 없으니 취소도 못 한다. 그 명목은 회차 끝까지 노출에 남고,
@@ -971,7 +987,7 @@ func TestUnknownCreateWithIDIsCancelledNotResent(t *testing.T) {
 	// 풀린다. 해시가 없는 경우는 TestNoHashKeepsTheNotionalReserved 가 본다.
 	h.orders.createFn = func(n int, r Request) (CreateResult, error) {
 		id := fmt.Sprintf("ord-%d", n)
-		if r.Tick.V == 46 {
+		if r.Tick.V == limitPriceNum {
 			return CreateResult{ID: id, Hash: "hash-" + id}, &fakeOrderError{safe: false, msg: "결과 불명"}
 		}
 		return CreateResult{ID: id, Hash: "hash-" + id}, nil
@@ -984,7 +1000,7 @@ func TestUnknownCreateWithIDIsCancelledNotResent(t *testing.T) {
 	}
 	// **다시 걸지 않는다.** 그 주문은 살아 있을 수 있고, 다리당 한 건이
 	// 이 봇의 규약이다.
-	if n := h.orders.createsAtTick(46); n != 1 {
+	if n := h.orders.createsAtTick(limitPriceNum); n != 1 {
 		t.Errorf("메이커 다리 주문 생성 %d회 — 결과 불명 주문을 두고 또 걸면 노출이 두 배다", n)
 	}
 }
@@ -996,7 +1012,7 @@ func TestRejectedCreateMayBeRetried(t *testing.T) {
 	h := newHarness(t)
 	first := true
 	h.orders.createFn = func(n int, r Request) (CreateResult, error) {
-		if r.Tick.V == 46 && first {
+		if r.Tick.V == limitPriceNum && first {
 			first = false
 			return CreateResult{}, &fakeOrderError{safe: true, msg: "거래소 거부"}
 		}
@@ -1006,12 +1022,12 @@ func TestRejectedCreateMayBeRetried(t *testing.T) {
 	if err := h.run(); err != nil {
 		t.Fatalf("RunRound: %v", err)
 	}
-	if n := h.orders.createsAtTick(46); n != 2 {
+	if n := h.orders.createsAtTick(limitPriceNum); n != 2 {
 		t.Errorf("메이커 다리 주문 생성 %d회, 기대 2회 — 거부 1회 뒤 성공 1회", n)
 	}
 	// 그리고 곧바로 다시 두드리지 않는다. 루프 주기가 50~100ms 라 백오프가
 	// 없으면 회차 하나가 240 req/min 예산을 통째로 태운다.
-	steps := h.orders.stepsAtTick(46)
+	steps := h.orders.stepsAtTick(limitPriceNum)
 	if len(steps) < 2 {
 		t.Fatalf("메이커 다리가 %d회만 나갔다", len(steps))
 	}
@@ -1033,7 +1049,7 @@ func TestRetriesAreBounded(t *testing.T) {
 	}
 	// 다리마다 상한을 따로 쓰는 것이 아니라, 시도 한 바퀴가 두 다리를 함께
 	// 두드린다 — 그래서 다리별로 정확히 maxPlaceAttempts 회다.
-	for _, tick := range []int64{60, 46} {
+	for _, tick := range []int64{60, limitPriceNum} {
 		if n := h.orders.createsAtTick(tick); n != maxPlaceAttempts {
 			t.Errorf("틱 %d 주문 생성 시도 %d회, 기대 %d회", tick, n, maxPlaceAttempts)
 		}
@@ -1044,7 +1060,7 @@ func TestRetriesAreBounded(t *testing.T) {
 func TestUnclassifiedCreateErrorIsTreatedAsUnknown(t *testing.T) {
 	h := newHarness(t)
 	h.orders.createFn = func(n int, r Request) (CreateResult, error) {
-		if r.Tick.V == 46 {
+		if r.Tick.V == limitPriceNum {
 			return CreateResult{}, errors.New("무엇인지 모르는 실패")
 		}
 		return CreateResult{ID: fmt.Sprintf("ord-%d", n)}, nil
@@ -1052,7 +1068,7 @@ func TestUnclassifiedCreateErrorIsTreatedAsUnknown(t *testing.T) {
 	if err := h.run(); err == nil {
 		t.Fatal("분류하지 못한 실패를 안전한 것으로 다뤘다")
 	}
-	if n := h.orders.createsAtTick(46); n != 1 {
+	if n := h.orders.createsAtTick(limitPriceNum); n != 1 {
 		t.Errorf("메이커 다리 주문 생성 %d회 — 분류하지 못한 실패는 '보냈을 수 있다'로 다뤄야 한다", n)
 	}
 }
@@ -1821,7 +1837,7 @@ func TestLastActionMovesOnlyOnce(t *testing.T) {
 	h.onStep = func(step int) {
 		switch step {
 		case 3:
-			h.setCrowd(map[float64]float64{0.46: 100}, map[float64]float64{0.60: 100})
+			h.setCrowd(map[float64]float64{0.48: 100}, map[float64]float64{0.60: 100})
 		case 6:
 			h.setCrowd(map[float64]float64{0.30: 100}, map[float64]float64{0.60: 100})
 		}
@@ -2035,5 +2051,43 @@ func TestLateJoinStillPolls(t *testing.T) {
 	}
 	if h.orders.createdCount() > 0 && h.fills.firstPollStep() > h.orders.firstCreateStep() {
 		t.Error("유예 2초 밖에서 합류했는데 체결 조회를 건너뛰었다")
+	}
+}
+
+// 0.5 상한이 **실제로 거부하는지** 본다.
+//
+// 상수가 0.48 인 한 [limitTick] 안의 그 분기는 영영 돌지 않는다. 그래서 검사를
+// 통째로 지워도 모든 시험이 통과했다(2026-08-14 변이 M4). 여기서는 가격을 직접
+// 넣어 분기를 밟는다 — 이 가드는 미래에 상수를 잘못 고치는 날을 위한 것이고,
+// 그날 정말 막는지는 지금 확인해 둬야 한다.
+func TestLimitTickRefusesHalfOrAbove(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		num, den  int64
+		precision int
+		wantErr   bool
+	}{
+		{"0.48 — 지금 값", 48, 100, 2, false},
+		{"0.49 — 상한 정각", 49, 100, 2, false},
+		{"0.50 — 상한 초과", 50, 100, 2, true},
+		{"0.51", 51, 100, 2, true},
+		{"0.90", 90, 100, 2, true},
+		{"0.50 은 정밀도가 커져도 거부된다", 50, 100, 6, true},
+		{"precision 1 에서 0.48 은 표현 불가", 48, 100, 1, true},
+	} {
+		tk, err := limitTickFor(c.num, c.den, c.precision)
+		if c.wantErr {
+			if err == nil {
+				t.Errorf("%s: 틱 %d 를 내줬다 — 거부해야 한다", c.name, tk.V)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("%s: %v", c.name, err)
+			continue
+		}
+		if want := c.num * (order.Full(c.precision) / c.den); tk.V != want {
+			t.Errorf("%s: 틱 %d, 기대 %d", c.name, tk.V, want)
+		}
 	}
 }
