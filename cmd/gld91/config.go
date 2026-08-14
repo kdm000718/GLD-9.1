@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -263,6 +264,14 @@ func checkConfig(c *Config) error {
 // lockPath 는 인스턴스 잠금 파일 경로다. 원장과 짝이어야 한다 — 잠그는
 // 대상이 "이 프로세스" 가 아니라 "이 원장" 이기 때문이다. 원장이 다르면 다른
 // 봇이고, 같으면 같은 봇이다.
+// recordDir 는 호가창·체결 기록이 쌓이는 디렉터리다 — 원장 옆이다.
+//
+// 별도 플래그를 두지 않는다. 기록은 그 원장이 만들어진 시장 상태의 사본이고,
+// 둘이 다른 곳에 있으면 사후에 짝을 맞추는 사람이 경로 두 개를 알아야 한다.
+func (c *Config) recordDir() string {
+	return filepath.Join(filepath.Dir(c.LedgerPath), "book")
+}
+
 func (c *Config) lockPath() string {
 	if c.LockPath != "" {
 		return c.LockPath

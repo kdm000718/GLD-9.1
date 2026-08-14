@@ -61,14 +61,14 @@ func TestUnknownCommandDoesNothing(t *testing.T) {
 
 // --- 폴백 알림 ---
 
-type recorder struct{ msgs []string }
+type msgSink struct{ msgs []string }
 
-func (r *recorder) send(m string) error { r.msgs = append(r.msgs, m); return nil }
+func (r *msgSink) send(m string) error { r.msgs = append(r.msgs, m); return nil }
 
 // 모니터가 죽으면 텔레그램이 조용해지는데, 그 침묵은 "이상 없음" 과 구분되지
 // 않는다. 봇이 직접 한 번 알린다 — GLD-7 에는 이 경로가 없었다.
 func TestFallbackNotifiesOnceThenRecovers(t *testing.T) {
-	r := &recorder{}
+	r := &msgSink{}
 	f := &fallbackNotifier{Threshold: 20 * time.Second, Interval: time.Second, Send: r.send}
 	now := time.Unix(1786000000, 0).UTC()
 
@@ -95,7 +95,7 @@ func TestFallbackNotifiesOnceThenRecovers(t *testing.T) {
 
 // 끊겼다 복구됐다를 반복하면 매번 알린다 — 그 반복 자체가 신호다.
 func TestFallbackRefiresAfterRecovery(t *testing.T) {
-	r := &recorder{}
+	r := &msgSink{}
 	f := &fallbackNotifier{Threshold: 10 * time.Second, Interval: time.Second, Send: r.send}
 	now := time.Unix(1786000000, 0).UTC()
 	for i := 0; i < 3; i++ {
@@ -147,7 +147,7 @@ func TestFallbackLogsSendFailure(t *testing.T) {
 // 성공도 남긴다. 성공이 조용하면 이 경로가 실제로 도는지 확인할 방법이 없다.
 func TestFallbackLogsSuccess(t *testing.T) {
 	var logged []string
-	r := &recorder{}
+	r := &msgSink{}
 	f := &fallbackNotifier{
 		Threshold: time.Second, Interval: time.Second, Send: r.send,
 		Log: func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) },

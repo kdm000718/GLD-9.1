@@ -368,6 +368,10 @@ type router struct {
 	// 섞으면 24시간 DRY-RUN 에서 둘을 구분할 수 없다.
 	assumptionErrs int64 // atomic
 	transportErrs  int64 // atomic
+
+	// rec 는 호가창·체결 기록기다. nil 이면 기록하지 않는다 — 거래는 그대로
+	// 돈다(recorder.go). **거래 판단은 이 값을 절대 읽지 않는다.**
+	rec *recorder
 }
 
 func newRouter() *router { return &router{items: map[int64]*tracked{}} }
@@ -384,7 +388,7 @@ func (rt *router) onFrame(f ws.Frame) {
 		return
 	}
 	kind, marketID, ok := ws.ParseTopic(f.Msg.Topic)
-	if !ok || kind != "predictOrderbook" {
+	if !ok {
 		return
 	}
 	rt.mu.Lock()
@@ -393,6 +397,21 @@ func (rt *router) onFrame(f ws.Frame) {
 	if t == nil {
 		return // 방금 구독해제한 회차의 지연 프레임. 무해하다.
 	}
+	recv := time.Unix(0, f.RecvUnixNs)
+
+	// **기록이 먼저다.** Apply 가 버리는 프레임(순서 역전·중복 스냅샷)도
+	// 기록에는 남아야 한다 — 사후 재구성은 봇이 무엇을 봤는지가 아니라
+	// 시장이 무엇이었는지를 묻는다.
+	switch kind {
+	case "predictOrderbook":
+		rt.rec.observe(recBook, marketID, t.round.Precision, recv, f.Msg.Data)
+	case "predictTrades":
+		rt.rec.observe(recTrade, marketID, t.round.Precision, recv, f.Msg.Data)
+		return // 체결 스트림은 호가창에 넣지 않는다.
+	default:
+		return
+	}
+
 	if _, err := t.book.Apply(f); err != nil {
 		// 관대한 파싱 — 프레임 하나로 회차를 죽이지 않는다.
 		logf("오더북 프레임 파싱 실패 (marketId=%d): %v", marketID, err)
@@ -410,11 +429,25 @@ func (rt *router) subscribeAll(ctx context.Context, s ws.Sender) error {
 	rt.mu.Unlock()
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	for _, id := range ids {
-		if err := s.Send(ctx, ws.SubscribeRequest(atomic.AddUint64(&rt.reqID, 1), ws.TopicOrderbook(id))); err != nil {
-			return fmt.Errorf("marketId=%d 구독 실패: %w", id, err)
+		for _, topic := range rt.topics(id) {
+			if err := s.Send(ctx, ws.SubscribeRequest(atomic.AddUint64(&rt.reqID, 1), topic)); err != nil {
+				return fmt.Errorf("marketId=%d 구독 실패(%s): %w", id, topic, err)
+			}
 		}
 	}
 	return nil
+}
+
+// topics 는 마켓 하나에 구독할 토픽이다.
+//
+// 오더북은 거래에 쓰고, 체결 스트림은 **기록에만** 쓴다. 그래서 기록기가
+// 없으면 체결 스트림도 구독하지 않는다 — 쓰지 않을 프레임을 받아 버리는
+// 것은 대역폭이 아니라 잡음이다.
+func (rt *router) topics(id int64) []string {
+	if rt.rec == nil {
+		return []string{ws.TopicOrderbook(id)}
+	}
+	return []string{ws.TopicOrderbook(id), ws.TopicTrades(id)}
 }
 
 // sync 는 회차 목록을 받아 구독을 맞춘다. 새 회차는 구독하고, 끝난 회차는
@@ -443,15 +476,24 @@ func (rt *router) sync(ctx context.Context, s ws.Sender, rounds []live.Round, no
 	rt.mu.Unlock()
 
 	for _, a := range added {
-		if err := s.Send(ctx, ws.SubscribeRequest(atomic.AddUint64(&rt.reqID, 1), ws.TopicOrderbook(a.id))); err != nil {
-			logf("신규 회차 구독 실패 (%s): %v", a.slug, err)
+		failed := false
+		for _, topic := range rt.topics(a.id) {
+			if err := s.Send(ctx, ws.SubscribeRequest(atomic.AddUint64(&rt.reqID, 1), topic)); err != nil {
+				logf("신규 회차 구독 실패 (%s, %s): %v", a.slug, topic, err)
+				failed = true
+				break
+			}
+		}
+		if failed {
 			continue
 		}
 		logf("회차 구독: %s", a.slug)
 	}
 	for _, id := range removed {
 		// 베스트에포트다. 회차가 끝나면 서버가 자연히 갱신을 멈춘다.
-		_ = s.Send(ctx, ws.UnsubscribeRequest(atomic.AddUint64(&rt.reqID, 1), ws.TopicOrderbook(id)))
+		for _, topic := range rt.topics(id) {
+			_ = s.Send(ctx, ws.UnsubscribeRequest(atomic.AddUint64(&rt.reqID, 1), topic))
+		}
 	}
 }
 
@@ -538,6 +580,24 @@ func loop(ctx context.Context, cfg *Config, rc *rest.Client, runner *exec.Runner
 	}
 
 	rt := newRouter()
+
+	// --- 호가창·체결 기록 ---------------------------------------------------
+	//
+	// **거래 조건이 아니다.** 못 열면 로그만 남기고 그대로 돈다(recorder.go).
+	// GLD91_NO_RECORD 로 끌 수 있다 — 디스크가 찼을 때의 탈출구다.
+	if os.Getenv("GLD91_NO_RECORD") != "" {
+		logf("호가 기록: 꺼짐 (GLD91_NO_RECORD)")
+	} else if rec, err := newRecorder(cfg.recordDir(), logf); err != nil {
+		logf("⚠️ 호가 기록을 켜지 못했다 — 거래는 그대로 돈다: %v", err)
+	} else {
+		rt.rec = rec
+		go rec.run()
+		// **원장 Close 보다 나중에 닫혀야 한다** 는 제약은 없다. 기록은
+		// 거래와 무관하므로 여기서 defer 로 충분하다.
+		defer rec.close()
+		logf("호가 기록: %s (보관 %d일, 체결 스트림 포함)", cfg.recordDir(), recRetainDays)
+	}
+
 	var wsc *ws.Client
 	wsc = ws.New(ws.Options{
 		URL:    cfg.WSURL,
