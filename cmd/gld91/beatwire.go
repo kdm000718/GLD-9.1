@@ -85,6 +85,10 @@ func newBeatWire(getenv func(string) string, version string, armed bool, bootID 
 		armed:   armed,
 		skips:   map[beat.SkipReason]int{},
 	}
+	// **탐침 갱신을 전송 경로에 꽂는다.** 이 한 줄이 빠지면 스냅샷의 WS 수신
+	// 시각이 Publish 시점에 얼어붙고, 걸지 않는 회차가 5분 내내 같은 값을
+	// 재전송해 모니터가 "마켓데이터 300초 정체" 로 읽는다(2026-08-14 실측).
+	w.rp.refresh = w.refreshProbes
 	if tok := strings.TrimSpace(getenv(EnvBotTGToken)); tok != "" {
 		chat := strings.TrimSpace(getenv(EnvBotTGChat))
 		w.fb.Send = botTelegramSender(tok, chat)
@@ -191,20 +195,32 @@ func (w *beatWire) publish(in snapshotInput) {
 	in.Armed = w.armed
 	in.Acked = w.rp.Acked()
 
+	// **탐침은 여기서 읽지 않는다.** 전송 직전에 [beatWire.refreshProbes] 가
+	// 다시 읽는다 — 그래야 신선도가 Publish 빈도에 매이지 않는다(beat.go 의
+	// reporter.refresh 주석).
+	w.rp.Publish(buildSnapshot(in))
+}
+
+// refreshProbes 는 전송 직전에 살아 있는 관측을 스냅샷에 덮어쓴다.
+//
+// reporter 의 send 고루틴에서 3초마다 불린다. 각 탐침은 뮤텍스 읽기 하나로
+// 끝나야 한다.
+func (w *beatWire) refreshProbes(s *beat.Snapshot) {
+	if w == nil || s == nil {
+		return
+	}
 	w.mu.Lock()
 	p := w.probes
 	w.mu.Unlock()
 	if p.WSLastDataAt != nil {
-		in.WSLastDataAt = p.WSLastDataAt()
+		s.Loop.WSLastDataAt = p.WSLastDataAt()
 	}
 	if p.FillsPollAt != nil {
-		in.FillsPollAt = p.FillsPollAt()
+		s.Loop.FillsPollAt = p.FillsPollAt()
 	}
 	if p.RateRemaining != nil {
-		in.RateRemaining = p.RateRemaining()
+		s.Loop.RateLimitRemaining = p.RateRemaining()
 	}
-
-	w.rp.Publish(buildSnapshot(in))
 }
 
 // Run 은 전송·명령 소비·폴백 알림 셋을 띄운다. ctx 가 끝날 때까지 돈다.
