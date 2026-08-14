@@ -125,7 +125,9 @@ func TestWhyExplainsConfBelowAsNormal(t *testing.T) {
 	if !handled {
 		t.Fatal("처리되지 않았다")
 	}
-	for _, want := range []string{"conf_below", "0.0031", "0.0172", "정상"} {
+	// 문턱 값은 스냅샷이 실어 오는 것이므로 여기서 리터럴로 박지 않는다 —
+	// live.ConfidenceThreshold 가 바뀔 때마다 이 시험이 깨지면 안 된다.
+	for _, want := range []string{"conf_below", "0.0031", "문턱", "정상"} {
 		if !strings.Contains(reply, want) {
 			t.Errorf("응답에 %q 가 없다:\n%s", want, reply)
 		}

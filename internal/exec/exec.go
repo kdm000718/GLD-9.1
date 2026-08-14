@@ -961,7 +961,7 @@ func (r *Runner) check(rd live.Round, f live.Frozen) error {
 		return fmt.Errorf("exec: 동결된 예측이 다른 회차의 것이다 (동결 t=%d, 회차 시작=%d)", f.T, rd.StartMS())
 	}
 	// 문턱을 여기서 한 번 더 본다. live.Freeze 가 이미 정했지만 exec 는 주문이
-	// 나가기 전 마지막 관문이고, 문턱 0.0172 는 사용자가 정한 값이라 배선
+	// 나가기 전 마지막 관문이고, 문턱은 사용자가 정한 값이라 배선
 	// 실수로 우회되면 안 된다. Eligible 플래그만 믿으면 손으로 만든 Frozen 하나가
 	// 그 제약을 통째로 지운다.
 	if !(f.Confidence >= live.ConfidenceThreshold) {

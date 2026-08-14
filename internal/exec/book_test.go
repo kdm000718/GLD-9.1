@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/kdm000718/GLD-9.1/internal/ledger"
+	"github.com/kdm000718/GLD-9.1/internal/live"
 	"github.com/kdm000718/GLD-9.1/internal/predictfun/order"
 	"github.com/kdm000718/GLD-9.1/internal/predictfun/ws"
 )
@@ -141,7 +142,7 @@ func TestBookNeverChangesTheOrder(t *testing.T) {
 			h := newHarness(t)
 			h.frozen.Direction = dir
 			if dir == ledger.OutcomeDown {
-				h.frozen.PUp = 0.47
+				h.frozen.PUp = 0.5 - live.ConfidenceThreshold
 			}
 			h.setCrowd(s.bids, s.asks)
 			if err := h.run(); err != nil {
@@ -174,7 +175,7 @@ func TestBookNeverChangesTheOrder(t *testing.T) {
 func TestDownRoundLogsTheMirroredMarket(t *testing.T) {
 	h := newHarness(t)
 	h.frozen.Direction = ledger.OutcomeDown
-	h.frozen.PUp = 0.47
+	h.frozen.PUp = 0.5 - live.ConfidenceThreshold
 	// Up 매수 0.55 / 매도 0.59  →  Down 매수 0.41 / 매도 0.45
 	h.setCrowd(map[float64]float64{0.55: 100}, map[float64]float64{0.59: 100})
 

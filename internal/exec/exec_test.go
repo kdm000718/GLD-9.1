@@ -381,10 +381,14 @@ func newHarness(t *testing.T) *harness {
 		// equity 100 → cap 4.55. 지정가 0.47 이면 9주(명목 4.23)가 나간다.
 		equity: risk.Equity{AvailableUSDT: 100},
 	}
+	// **문턱을 리터럴로 박지 않는다.** 문턱이 바뀌면 이 하네스가 통째로
+	// "Eligible 인데 문턱 미달" 로 죽는다(2026-08-15 에 실제로 그랬다).
+	// 문턱의 두 배로 두면 어떤 값이든 넉넉히 통과한다.
+	const testConf = 2 * live.ConfidenceThreshold
 	h.frozen = live.Frozen{
 		T:          h.round.StartMS(),
-		PUp:        0.53,
-		Confidence: 0.06,
+		PUp:        0.5 + testConf/2,
+		Confidence: testConf,
 		Direction:  ledger.OutcomeUp,
 		Eligible:   true,
 	}
@@ -1584,7 +1588,7 @@ func TestEligibleFlagAloneIsNotEnough(t *testing.T) {
 // 방향과 확률이 어긋나면 매 회차 정확히 반대에 베팅한다.
 func TestDirectionMustAgreeWithPUp(t *testing.T) {
 	h := newHarness(t)
-	h.frozen.PUp = 0.47 // 하락 확률이 높은데
+	h.frozen.PUp = 0.5 - live.ConfidenceThreshold // 하락 확률이 높은데
 	h.frozen.Direction = ledger.OutcomeUp
 	if err := h.run(); err == nil {
 		t.Fatal("p_up 과 방향이 어긋난 동결값을 받아들였다")

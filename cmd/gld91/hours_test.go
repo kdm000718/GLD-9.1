@@ -18,15 +18,37 @@ import (
 //	(2) 판정이 UTC 로 이뤄진다 — 서버는 도쿄(UTC+9)에 있다
 //	(3) 관문이 배선돼 있다 — 함수가 맞아도 호출부가 없으면 아무 일도 안 난다
 
-// 사용자가 고른 12개를 여기 한 번 더 적는다. hours.go 의 배열을 그대로 읽어
-// 비교하면 아무것도 검증하지 못한다 — 두 곳이 같은 실수를 하려면 사람이 두 번
-// 고쳐야 한다.
-var chosen = []int{2, 3, 6, 8, 11, 12, 15, 16, 17, 18, 21, 22}
+// 사용자가 **제외한** 시각을 여기 한 번 더 적는다. hours.go 의 배열을 그대로
+// 읽어 비교하면 아무것도 검증하지 못한다 — 두 곳이 같은 실수를 하려면 사람이
+// 두 번 고쳐야 한다.
+//
+// 2026년 문턱 0.0714 통과분에서 판정 승률이 손익분기(52.70%) 아래로 나온 넷이다.
+var excluded = []int{6, 7, 10, 12}
+
+// chosen 은 그 나머지 20개다.
+var chosen = func() []int {
+	var out []int
+	for h := 0; h < 24; h++ {
+		skip := false
+		for _, e := range excluded {
+			if h == e {
+				skip = true
+			}
+		}
+		if !skip {
+			out = append(out, h)
+		}
+	}
+	return out
+}()
 
 // errFake 는 스킵 사유 우선순위 시험에서 "무언가 실패했다" 를 나타낸다.
 var errFake = errors.New("가짜 실패")
 
 func TestTradingHoursAreExactlyWhatTheUserChose(t *testing.T) {
+	if len(chosen) != 20 {
+		t.Fatalf("켜진 시각이 %d개여야 한다 (24 − 제외 %d)", 24-len(excluded), len(excluded))
+	}
 	var on []int
 	for h := 0; h < 24; h++ {
 		if tradingHours[h] {
@@ -62,7 +84,7 @@ func TestTradingHourCoversEveryHour(t *testing.T) {
 // **시(hour) 안쪽은 전부 같은 판정이다.** 5분봉이므로 한 시각에 회차가 12개
 // 들어온다 — 그중 하나만 다르게 판정되면 그 회차만 조용히 빠지거나 끼어든다.
 func TestEveryRoundInsideAnHourAgrees(t *testing.T) {
-	for _, h := range []int{2, 5} { // 켜진 시각 하나, 꺼진 시각 하나
+	for _, h := range []int{2, 6} { // 켜진 시각 하나, 꺼진 시각 하나
 		want := tradingHour(time.Date(2026, 8, 14, h, 0, 0, 0, time.UTC))
 		for m := 0; m < 60; m += 5 {
 			at := time.Date(2026, 8, 14, h, m, 0, 0, time.UTC)
@@ -89,15 +111,14 @@ func TestTradingHourIgnoresTheLocation(t *testing.T) {
 		utc  int
 		want bool
 	}{
-		{jst: 20, utc: 11, want: true},  // 로컬 20시는 꺼짐, UTC 11시는 켜짐
-		{jst: 1, utc: 16, want: true},   // 로컬 01시는 꺼짐, UTC 16시는 켜짐
-		{jst: 0, utc: 15, want: true},   // 로컬 00시는 꺼짐, UTC 15시는 켜짐
+		{jst: 15, utc: 6, want: false},  // 로컬 15시는 켜짐, UTC 06시는 꺼짐
+		{jst: 16, utc: 7, want: false},  // 로컬 16시는 켜짐, UTC 07시는 꺼짐
+		{jst: 19, utc: 10, want: false}, // 로컬 19시는 켜짐, UTC 10시는 꺼짐
+		{jst: 21, utc: 12, want: false}, // 로컬 21시는 켜짐, UTC 12시는 꺼짐
+		{jst: 6, utc: 21, want: true},   // 로컬 06시는 꺼짐, UTC 21시는 켜짐
 		{jst: 7, utc: 22, want: true},   // 로컬 07시는 꺼짐, UTC 22시는 켜짐
-		{jst: 11, utc: 2, want: true},   // 둘 다 켜짐 — 아래에서 걸러진다
-		{jst: 22, utc: 13, want: false}, // 로컬 22시는 켜짐, UTC 13시는 꺼짐
-		{jst: 12, utc: 3, want: true},   // 로컬 12시는 켜짐, UTC 03시도 켜짐
-		{jst: 2, utc: 17, want: true},   // 로컬 02시는 켜짐, UTC 17시도 켜짐
-		{jst: 18, utc: 9, want: false},  // 로컬 18시는 켜짐, UTC 09시는 꺼짐
+		{jst: 12, utc: 3, want: true},   // 로컬 12시는 꺼짐, UTC 03시는 켜짐
+		{jst: 10, utc: 1, want: true},   // 로컬 10시는 꺼짐, UTC 01시는 켜짐
 	} {
 		at := time.Date(2026, 8, 14, c.jst, 30, 0, 0, tokyo)
 		if got := at.UTC().Hour(); got != c.utc {
@@ -112,7 +133,7 @@ func TestTradingHourIgnoresTheLocation(t *testing.T) {
 	// 겹치는 시각뿐이면 이 시험은 아무것도 막지 못한다.
 	split := 0
 	for _, c := range []struct{ jst, utc int }{
-		{20, 11}, {1, 16}, {0, 15}, {7, 22}, {11, 2}, {22, 13}, {12, 3}, {2, 17}, {18, 9},
+		{15, 6}, {16, 7}, {19, 10}, {21, 12}, {6, 21}, {7, 22}, {12, 3}, {10, 1},
 	} {
 		if tradingHours[c.jst] != tradingHours[c.utc] {
 			split++

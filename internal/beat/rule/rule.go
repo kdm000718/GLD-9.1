@@ -14,7 +14,7 @@
 //
 // # "안 하고 있음"은 알람이 아니다
 //
-// 이 봇은 `confidence = 2×|p_up−0.5|` 가 `live.ConfidenceThreshold`(0.0172)
+// 이 봇은 `confidence = 2×|p_up−0.5|` 가 `live.ConfidenceThreshold`
 // 미만이면 그 회차를 통째로 건너뛴다. 그것이 **옳은 동작**이고 몇 시간
 // 이어질 수 있다. 그래서 참여율이나 "최근 N분 회차 수" 같은 지표로는 판정할
 // 수 없고, 오직 스킵 **사유**로만 판정한다([skipFinding]).

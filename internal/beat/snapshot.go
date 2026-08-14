@@ -59,7 +59,7 @@ type Reply struct {
 // SkipReason 은 회차를 건너뛴 이유다.
 //
 // **사유 없는 스킵 카운터는 무가치하다.** 이 봇은 `confidence` 문턱
-// (`live.ConfidenceThreshold` = 0.0172) 미달로 회차를 건너뛰는 것이 정상
+// (`live.ConfidenceThreshold`) 미달로 회차를 건너뛰는 것이 정상
 // 동작이고, 그 상태가 몇 시간 이어질 수 있다. 그래서 "안 하고 있음" 자체는
 // 알람이 될 수 없고, 오직 "왜 안 하는지"만 판단 근거가 된다.
 type SkipReason string

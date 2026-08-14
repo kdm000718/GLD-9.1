@@ -47,16 +47,18 @@ func TestFrozenIsAValueNotAReference(t *testing.T) {
 
 // --- 문턱 ---
 
-// confidence = 2×|p−0.5|. 문턱 0.0172.
+// confidence = 2×|p−0.5|. 문턱 0.0714 (p_up ≥ 0.5357 또는 ≤ 0.4643).
 func TestEligibleThreshold(t *testing.T) {
 	cases := []struct {
 		pUp  float64
 		want bool
 	}{
-		{0.5086, true},  // conf = 0.01720000000000010… ≥ 0.0172
-		{0.5085, false}, // conf = 0.01699999999999990… < 0.0172
-		{0.52, true},
-		{0.48, true},
+		{0.5358, true},  // conf = 0.0716000000000001… ≥ 0.0714
+		{0.5357, false}, // conf = 0.0713999999999999… < 0.0714 (아래 대칭 시험 참고)
+		{0.4643, true},  // conf = 0.0714000000000000… ≥ 0.0714
+		{0.4644, false}, // conf = 0.0712000000000000… < 0.0714
+		{0.52, false},   // conf 0.04 — 예전 문턱(0.0172)에서는 통과했다
+		{0.48, false},   // conf 0.04
 		{0.5, false},
 		{0.501, false},
 		{0.9, true},
@@ -72,7 +74,7 @@ func TestEligibleThreshold(t *testing.T) {
 
 // **부등호가 `>=` 인 것을 정확히 못 박는다.**
 //
-// p_up 쪽에서는 이것을 시험할 수 없다: 2×|p−0.5| 가 0.0172 와 **정확히** 같아지는
+// p_up 쪽에서는 이것을 시험할 수 없다: 2×|p−0.5| 가 문턱과 **정확히** 같아지는
 // float64 p 를 만들 수 없다(십진 경계값이 이진수로 정확히 떨어지지 않는다).
 // 그래서 문턱 판정만 떼어내 정확한 값으로 시험한다 — 이것이 없으면
 // `>=` → `>` 변이가 살아남는다.
@@ -93,20 +95,23 @@ func TestEligibleIsInclusiveAtThreshold(t *testing.T) {
 
 // **문턱은 십진수로 대칭이 아니다(실측).**
 //
-// p=0.5086 과 p=0.4914 는 십진수로는 둘 다 confidence 0.0172 지만, float64 로는
-// 앞이 0.0172000000000001, 뒤가 0.0171999999999999 다 — 앞만 통과한다.
-// 손실로 이어지는 차이는 아니다(0.0172 근처에서 방향 한 쪽이 머리카락만큼 더
+// p=0.5357 과 p=0.4643 은 십진수로는 둘 다 confidence 0.0714 지만, float64 로는
+// 앞이 0.071399999999999908, 뒤가 0.071400000000000019 다 — **뒤만 통과한다.**
+// 문턱 0.0172 시절에는 반대였다(Up 쪽만 통과). 어느 쪽이 관대한지는 문턱 값에
+// 따라 바뀌고, 그것이 이 시험이 값을 박아 두는 이유다.
+//
+// 손실로 이어지는 차이는 아니다(문턱 근처에서 방향 한 쪽이 머리카락만큼 더
 // 엄격할 뿐이다). 여기 적어 두는 이유는 두 가지다: 누군가 "대칭이 아니다"를
 // 결함으로 오해해 엡실론을 넣지 않도록, 그리고 십진 경계값으로 이 문턱을
 // 시험하려는 시도가 왜 실패하는지 남기려고.
 func TestThresholdIsNotDecimalSymmetric(t *testing.T) {
-	up := newFrozen(roundT, 0.5086)
-	down := newFrozen(roundT, 0.4914)
-	if !up.Eligible {
-		t.Error("p=0.5086 이 기각됐다")
+	up := newFrozen(roundT, 0.5357)
+	down := newFrozen(roundT, 0.4643)
+	if up.Eligible {
+		t.Errorf("p=0.5357 이 통과했다 (conf=%.17g) — float64 표현이 바뀌었나", up.Confidence)
 	}
-	if down.Eligible {
-		t.Errorf("p=0.4914 가 통과했다 (conf=%.17g) — float64 표현이 바뀐 것이 아니라면 부등호를 확인하라", down.Confidence)
+	if !down.Eligible {
+		t.Errorf("p=0.4643 이 기각됐다 (conf=%.17g)", down.Confidence)
 	}
 }
 
