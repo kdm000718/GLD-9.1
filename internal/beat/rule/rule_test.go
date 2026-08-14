@@ -37,6 +37,17 @@ func healthy() Input {
 }
 
 // findLevel 은 그 키의 알람 등급이다. 없으면 Info(= 알람 없음).
+// fired 는 그 키의 소견이 **나왔는지**만 본다. findLevel 은 없을 때 Info 를
+// 돌려주므로 "안 울렸다" 를 그것으로 판정하면 Info 소견과 구분되지 않는다.
+func fired(fs []Finding, key string) bool {
+	for _, f := range fs {
+		if f.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
 func findLevel(fs []Finding, key string) Level {
 	for _, f := range fs {
 		if f.Key == key {
@@ -267,6 +278,63 @@ func TestDisarmAndDailyLimit(t *testing.T) {
 	in.Snap.Equity.CanArm = false
 	if got := findLevel(Evaluate(in), "can_arm"); got != Warn {
 		t.Errorf("CanArm false 에 %v, want Warn", got)
+	}
+}
+
+// **거래 시간대가 아닌 회차의 equity 는 "0" 이 아니라 "안 봤다" 다.**
+//
+// 봇은 그 회차에 자본을 조회하지 않는다(cmd/gld91/hours.go — 걸지 않을 회차에
+// REST 왕복을 쓰지 않는다). 그 제로값으로 경보하면 하루 절반이 오경보가 되고,
+// 그러면 정작 자본이 진짜 마른 날 이 경보가 배경 소음에 묻힌다. 2026-08-14 에
+// 실제로 그 상태를 만들었다 — 144회/일.
+func TestOutsideHoursDoesNotFireCanArm(t *testing.T) {
+	in := healthy()
+	in.Snap.Round.State = beat.RoundSkipped
+	in.Snap.Round.SkipReason = beat.SkipOutsideHours
+	in.Snap.Equity.CanArm = false
+	in.Snap.Equity.CapUSD = 0
+	if fired(Evaluate(in), "can_arm") {
+		t.Error("거래 시간대 밖인데 can_arm 이 울렸다 — 재지 않은 자본으로 경보했다")
+	}
+	// 스킵 사유 자체도 알람이 아니다.
+	if fired(Evaluate(in), "skip:outside_hours") {
+		t.Error("outside_hours 가 울렸다 — 하루 절반이 이 상태다")
+	}
+}
+
+// **다른 스킵 사유는 여전히 울린다.** 위 예외가 넓어지면 자본 부족이 통째로
+// 조용해진다 — 그쪽이 훨씬 나쁜 실패다.
+func TestOtherSkipsStillFireCanArm(t *testing.T) {
+	for _, r := range []beat.SkipReason{
+		beat.SkipConfBelow, beat.SkipSampleRejected, beat.SkipEquity,
+		beat.SkipDailyLimit, beat.SkipFetchError, beat.SkipPredictError, "",
+	} {
+		in := healthy()
+		in.Snap.Round.State = beat.RoundSkipped
+		in.Snap.Round.SkipReason = r
+		in.Snap.Equity.CanArm = false
+		if got := findLevel(Evaluate(in), "can_arm"); got != Warn {
+			t.Errorf("스킵 사유 %q 에서 can_arm 이 %v — Warn 이어야 한다", r, got)
+		}
+	}
+}
+
+// 거래 시간대 밖이어도 **자본이 정상이면** 아무 일도 없다. 예외가 다른 경보를
+// 삼키지 않는지 본다.
+func TestOutsideHoursKeepsOtherAlarms(t *testing.T) {
+	in := healthy()
+	in.Snap.Round.State = beat.RoundSkipped
+	in.Snap.Round.SkipReason = beat.SkipOutsideHours
+	in.Snap.Armed = false
+	if got := findLevel(Evaluate(in), "disarmed"); got != Crit {
+		t.Errorf("거래 시간대 밖에서 무장 해제가 %v — Crit 이어야 한다", got)
+	}
+	in = healthy()
+	in.Snap.Round.State = beat.RoundSkipped
+	in.Snap.Round.SkipReason = beat.SkipOutsideHours
+	in.Snap.Equity.DailyPnL = -20.0
+	if got := findLevel(Evaluate(in), "daily_limit"); got != Crit {
+		t.Errorf("거래 시간대 밖에서 일손실 한도가 %v — Crit 이어야 한다", got)
 	}
 }
 

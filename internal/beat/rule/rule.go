@@ -193,7 +193,15 @@ func Evaluate(in Input) []Finding {
 	if s.Equity.DailyLimit < 0 && s.Equity.DailyPnL <= s.Equity.DailyLimit {
 		add("daily_limit", Crit, "일손실 %.2f 가 한도 %.2f 에 닿았다", s.Equity.DailyPnL, s.Equity.DailyLimit)
 	}
-	if !s.Equity.CanArm {
+	// **거래 시간대가 아니면 자본을 재지 않는다.** 그 회차의 스냅샷에 실린
+	// equity 는 "0 이다" 가 아니라 "안 봤다" 이므로, 그것으로 경보하면 하루
+	// 절반이 오경보가 된다(2026-08-14 실측 144회/일). 봇은 미리 받아 둔 값을
+	// 실어 보내지만 기동 직후에는 그것도 비어 있다.
+	//
+	// 놓치는 것은 없다. 자본이 정말 말랐다면 **다음 거래 시간대의 실제
+	// 조회**가 그 자리에서 울린다 — 그리고 걸지 않는 시간대의 자본 부족은
+	// 그때 조치할 일이 아니다.
+	if !s.Equity.CanArm && s.Round.SkipReason != beat.SkipOutsideHours {
 		add("can_arm", Warn, "equity 가 무장 최소치 미만이다 (회차상한 %.2f)", s.Equity.CapUSD)
 	}
 

@@ -151,6 +151,19 @@ func TestRunRoundPassesTheHourGate(t *testing.T) {
 	if !strings.Contains(src, "OutsideHours: true") {
 		t.Error("관문이 감시에 사유를 올리지 않는다 — 모니터가 고장과 구분하지 못한다")
 	}
+	// **미리 받아 둔 자본도 함께 올려야 한다.** 비우면 감시가 cap 0.00 을
+	// "자본이 말랐다" 로 읽고 하루 절반을 경고한다(2026-08-14 실측 144회/일).
+	if !strings.Contains(src, "cachedEq, _, _ := ahead.cached(time.Now())") {
+		t.Error("관문이 미리 받아 둔 자본을 감시에 올리지 않는다 — cap 0.00 오경보가 난다")
+	}
+	if !strings.Contains(src, "Equity: cachedEq, OutsideHours: true") {
+		t.Error("보고에 Equity 가 실리지 않는다")
+	}
+	// 조회는 하지 않아야 한다 — 그것이 이 관문이 equity 앞에 있는 이유다.
+	gate2 := strings.Index(src, "cachedEq, _, _ := ahead.cached(time.Now())")
+	if r := strings.Index(src, "ahead.read(ctx, equitySrc, cfg, time.Now())"); r >= 0 && gate2 > r {
+		t.Error("캐시 읽기가 동기 조회 뒤에 있다")
+	}
 }
 
 // 스킵 사유가 감시 계약에 실려야 한다. equity 는 이 경로에서 조회하지 않으므로

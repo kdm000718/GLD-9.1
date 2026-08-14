@@ -743,7 +743,16 @@ func runRound(ctx context.Context, cfg *Config, runner *exec.Runner, predictor *
 	if !tradingHour(r.StartsAt) {
 		logf("회차 %s: UTC %02d시는 거래 시간대가 아니다 — 아무것도 하지 않는다",
 			r.Slug, r.StartsAt.UTC().Hour())
-		wire.Report(snapshotInput{Round: r, Frozen: frozen, OutsideHours: true})
+		// **미리 받아 둔 자본을 함께 올린다.** 조회는 하지 않되(그것이 이
+		// 관문이 여기 있는 이유다) 아는 값은 실어야 한다 — equity 를 비우면
+		// 감시가 cap 0.00 을 "자본이 말랐다" 로 읽고 하루 절반을 경고한다
+		// (2026-08-14 실측: `can_arm` 오경보 144회/일).
+		//
+		// 배경 조회는 거래 시간대와 무관하게 2분마다 돌므로 이 값은 신선하다.
+		// 비어 있으면(기동 직후) 제로값이 가는데, 그 경우는 rule 쪽에서
+		// `outside_hours` 스킵을 보고 경보하지 않는다.
+		cachedEq, _, _ := ahead.cached(time.Now())
+		wire.Report(snapshotInput{Round: r, Frozen: frozen, Equity: cachedEq, OutsideHours: true})
 		return nil
 	}
 
