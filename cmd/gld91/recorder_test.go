@@ -85,6 +85,70 @@ func TestRecorderWritesTheRawPayload(t *testing.T) {
 	}
 }
 
+// **프로세스가 살아 있는 동안에도 파일이 읽혀야 한다.**
+//
+// gzip.Writer 는 수만 바이트를 물고 있다가 Close 에서야 내놓는다. 주기적으로
+// 비우지 않으면 오늘 치를 오늘 분석할 수 없고(zcat 이 "unexpected end of
+// file" 로 끝난다), 봇이 크래시하면 마지막 버퍼가 통째로 사라진다.
+func TestRecorderFlushesWhileStillRunning(t *testing.T) {
+	old := recFlushEvery
+	recFlushEvery = 20 * time.Millisecond
+	defer func() { recFlushEvery = old }()
+
+	dir := t.TempDir()
+	r, err := newRecorder(dir, nil)
+	if err != nil {
+		t.Fatalf("newRecorder: %v", err)
+	}
+	go r.run()
+	defer r.close()
+
+	at := time.Date(2026, 8, 14, 8, 10, 0, 0, time.UTC)
+	const n = 50
+	for i := 0; i < n; i++ {
+		r.observe(recBook, 1, 2, at, json.RawMessage(`{"asks":[[0.55,10]],"bids":[[0.52,3]]}`))
+	}
+	path := filepath.Join(dir, recPrefix+"20260814"+recSuffix)
+
+	// **닫지 않은 채** 읽는다. 비우지 않으면 여기서 0줄이거나 깨진 파일이다.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if got := countLines(t, path); got == n {
+			return
+		} else if time.Now().After(deadline) {
+			t.Fatalf("%d줄만 읽힌다, 기대 %d줄 — gzip 버퍼가 비워지지 않았다", got, n)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// countLines 는 아직 열려 있는 gzip 을 관대하게 읽는다 — 마지막이 잘려 있어도
+// 그때까지 읽은 줄 수를 돌려준다. 살아 있는 파일을 읽는 것이 요점이다.
+func countLines(t *testing.T, path string) int {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		return 0
+	}
+	defer f.Close()
+	zr, err := gzip.NewReader(f)
+	if err != nil {
+		return 0
+	}
+	defer zr.Close()
+	zr.Multistream(false)
+	sc := bufio.NewScanner(zr)
+	sc.Buffer(make([]byte, 0, 1<<20), 1<<20)
+	n := 0
+	for sc.Scan() {
+		var l recLine
+		if json.Unmarshal(sc.Bytes(), &l) == nil {
+			n++
+		}
+	}
+	return n
+}
+
 // **호출자의 버퍼를 복사한다.** data 가 프레임 버퍼를 가리키는데 큐에 실린 뒤
 // 다음 프레임이 그 자리를 덮으면 기록이 조용히 뒤섞인다 — 에러도 없이.
 func TestRecorderCopiesTheCallersBuffer(t *testing.T) {

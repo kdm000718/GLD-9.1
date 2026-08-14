@@ -71,6 +71,19 @@ const (
 	recSuffix = ".jsonl.gz"
 )
 
+// recFlushEvery 는 gzip 버퍼를 비우는 주기다.
+//
+// **없으면 파일이 프로세스가 죽을 때까지 읽히지 않는다.** gzip.Writer 는
+// 수만 바이트를 물고 있다가 Close 에서야 내놓는다. 그 상태에서 봇이 크래시하면
+// 마지막 버퍼가 통째로 사라지고, 살아 있는 동안에도 `zcat` 이 "unexpected end
+// of file" 로 끝난다 — 오늘 치를 오늘 분석할 수 없다는 뜻이다.
+//
+// 5초면 크래시 손실이 5초치(십여 줄)로 묶인다. 압축률은 조금 떨어지지만,
+// 하루 십만 줄에서 몇 %다.
+//
+// var 인 것은 **시험이 줄이기 위해서**다. 운영 코드는 이 값을 바꾸지 않는다.
+var recFlushEvery = 5 * time.Second
+
 // recKind 는 한 줄이 무엇인지다. 짧은 것이 요점이다 — 하루 십만 줄이다.
 const (
 	recBook  = "b" // predictOrderbook 스냅샷 (전체 스냅샷이다, 델타가 아니다)
@@ -168,7 +181,25 @@ func (r *recorder) run() {
 	}
 	defer closeCur()
 
-	for line := range r.ch {
+	tick := time.NewTicker(recFlushEvery)
+	defer tick.Stop()
+
+	for {
+		var line recLine
+		select {
+		case <-tick.C:
+			// 큐가 조용한 사이에 버퍼를 내보낸다. **여기서 실패해도 계속
+			// 간다** — 다음 쓰기가 같은 실패를 다시 만난다.
+			if zw != nil {
+				_ = zw.Flush()
+			}
+			continue
+		case l, ok := <-r.ch:
+			if !ok {
+				return
+			}
+			line = l
+		}
 		d := time.UnixMilli(line.RecvMS).UTC().Format("20060102")
 		if d != day {
 			closeCur()
