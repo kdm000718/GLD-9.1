@@ -260,6 +260,10 @@ func skipFinding(r beat.SkipReason, consec int) []Finding {
 	switch r {
 	case beat.SkipConfBelow:
 		return nil
+	case beat.SkipOutsideHours:
+		// 거래 시간대가 아니다. 12시간 연속으로 이 사유가 나오는 것이 정상이라
+		// 연속 횟수로도 알람을 올리지 않는다.
+		return nil
 	case beat.SkipSampleRejected:
 		if consec >= SampleRejectedConsec {
 			return f(Warn, "표본 미채택 %d회차 연속 — 봉 데이터를 확인하라", consec)

@@ -11,6 +11,11 @@
 // internal/risk, 예측은 internal/live, 집행은 internal/exec 다. 여기 있는
 // 것은 배선과 게이트뿐이다.
 //
+// 게이트는 둘이다. 하나는 무장(아래), 다른 하나는 **시간대**다 — 정해진 UTC
+// 시각이 아니면 그 회차에는 아무것도 걸지 않는다(hours.go, 2026-08-14 사용자
+// 결정). 그 관문은 equity 조회보다 먼저 있어서, 걸지 않을 회차에는 REST 왕복도
+// 쓰지 않는다.
+//
 // # 무장
 //
 // `LIVE_ARM` 이 **정확히** `I_UNDERSTAND_THE_RISK` 일 때만 주문이 전송된다.
@@ -666,6 +671,21 @@ func runRound(ctx context.Context, cfg *Config, runner *exec.Runner, predictor *
 	}
 	logf("회차 %s: p_up %.6f, confidence %.6f (문턱 %.4f), 방향 %s, 자격 %v",
 		r.Slug, frozen.PUp, frozen.Confidence, live.ConfidenceThreshold, frozen.Direction, frozen.Eligible)
+
+	// **시간대 관문.** 문턱 미달과 같은 급의 정상 스킵이다(hours.go).
+	//
+	// equity 조회보다 **먼저** 본다. 걸지 않을 회차에 REST 왕복을 쓸 이유가
+	// 없고, 여기서 나가면 exec 은 이 회차를 보지도 못한다 — 노출이 생길 경로
+	// 자체가 없다.
+	//
+	// 회수(Auto-Claim)는 이 함수 밖에서 돈다. 걸지 않는 회차에도 지난 회차의
+	// 정산은 회수해야 하므로, 여기서 일찍 나가도 그 배선은 그대로다.
+	if !tradingHour(r.StartsAt) {
+		logf("회차 %s: UTC %02d시는 거래 시간대가 아니다 — 아무것도 하지 않는다",
+			r.Slug, r.StartsAt.UTC().Hour())
+		wire.Report(snapshotInput{Round: r, Frozen: frozen, OutsideHours: true})
+		return nil
+	}
 
 	eq, eqAge, err := ahead.read(ctx, equitySrc, cfg, time.Now())
 	if err != nil {

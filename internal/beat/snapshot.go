@@ -69,6 +69,9 @@ const (
 	SkipConfBelow SkipReason = "conf_below"
 	// SkipSampleRejected — 표본이 채택되지 않았다(워밍업 부족·결측·도지).
 	SkipSampleRejected SkipReason = "sample_rejected"
+	// SkipOutsideHours — 거래 시간대가 아니다(cmd/gld91/hours.go).
+	// **정상이고 알람이 아니다** — 하루의 절반은 이 사유로 조용하다.
+	SkipOutsideHours SkipReason = "outside_hours"
 	// SkipEquity — risk.CanArm 이 false 다(equity 가 약 $22 미만).
 	SkipEquity SkipReason = "equity"
 	// SkipDailyLimit — 일손실 한도.
@@ -84,7 +87,7 @@ const (
 // 모르면, 그 사유로 멈춘 봇이 조용해진다.
 func (s SkipReason) Valid() bool {
 	switch s {
-	case SkipConfBelow, SkipSampleRejected, SkipEquity,
+	case SkipConfBelow, SkipSampleRejected, SkipOutsideHours, SkipEquity,
 		SkipDailyLimit, SkipFetchError, SkipPredictError:
 		return true
 	}

@@ -31,11 +31,15 @@ type snapshotInput struct {
 	// Acked 는 봇이 실제로 받아서 처리한 마지막 명령이다.
 	Acked beat.Command
 
-	// 아래 넷이 스킵 사유를 가른다.
+	// 아래 다섯이 스킵 사유를 가른다.
 	SampleRejected bool
 	DailyBreached  bool
-	FetchErr       error
-	PredictErr     error
+	// OutsideHours 는 거래 시간대가 아니라는 뜻이다(cmd/gld91/hours.go).
+	// **equity 보다 먼저 본다** — 이 경로에서는 equity 를 조회하지 않으므로
+	// 제로값이 들어오고, 순서를 바꾸면 그것이 "equity 부족" 으로 보고된다.
+	OutsideHours bool
+	FetchErr     error
+	PredictErr   error
 
 	// Active 는 지금 회차를 운용 중인가다. 회차를 잡지 못했으면 false 이고
 	// 그때는 IDLE 이다.
@@ -140,6 +144,8 @@ func roundState(in snapshotInput) (beat.RoundState, beat.SkipReason) {
 		return beat.RoundSkipped, beat.SkipFetchError
 	case in.DailyBreached:
 		return beat.RoundSkipped, beat.SkipDailyLimit
+	case in.OutsideHours:
+		return beat.RoundSkipped, beat.SkipOutsideHours
 	case !risk.CanArm(in.Equity):
 		return beat.RoundSkipped, beat.SkipEquity
 	case in.SampleRejected:

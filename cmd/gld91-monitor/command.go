@@ -212,6 +212,9 @@ func formatWhy(s *state) string {
 		b.WriteString("← 정상입니다. 문턱 미달이면 아무것도 하지 않는 것이 옳습니다.")
 	case beat.SkipSampleRejected:
 		b.WriteString("표본이 채택되지 않았습니다 (워밍업 부족·결측·도지). 봉 데이터를 확인하세요.")
+	case beat.SkipOutsideHours:
+		b.WriteString("거래 시간대가 아닙니다 (UTC 2,3,6,8,11,12,15,16,17,18,21,22 시에만 겁니다).\n")
+		b.WriteString("← 정상입니다. 하루의 절반은 이 사유로 조용합니다.")
 	case beat.SkipEquity:
 		fmt.Fprintf(&b, "회차상한 %.2f 가 최소 주문 %.2f 이하입니다.", snap.Equity.CapUSD, snap.Consts.MinOrderUSD)
 	case beat.SkipDailyLimit:
