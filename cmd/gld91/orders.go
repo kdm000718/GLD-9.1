@@ -207,18 +207,17 @@ func (s *orderSender) build(r exec.Request) (body map[string]any, envelope []byt
 	if r.Tick.Precision < 1 || r.Tick.Precision > 18 {
 		return nil, nil, fmt.Errorf("틱 precision 이 %d 다", r.Tick.Precision)
 	}
-	// 여기 있던 "0.5 미만" 관문은 2026-08-14 에 풀렸다.
+	// **0.5 미만 지정가 매수만** 은 사용자 제약이다. 이기고도 본전 근처인
+	// 가격에 사는 주문은 어떤 전략에서도 실수다.
 	//
-	// 그날 주문이 두 다리가 됐다. 메이커 다리는 여전히 0.5 미만이고 exec 의
-	// limitTick 이 0.5 미만을 지킨다. 그러나 **테이커 다리는 최우선 매도호가
-	// 그대로 건다** — 실측 220 회차 중 61% 가 0.50 초과였으므로, 여기서 0.49 로
-	// 자르면 그 회차들에서 관통이 관통이 아니라 그냥 대기 주문이 된다(사용자
-	// 결정: "푼다 — 호가 그대로 관통").
+	// 이 관문은 2026-08-14 에 잠깐 풀렸다 — 그날 테이커 다리가 생겼고, 그
+	// 다리는 최우선 매도호가 그대로 걸어야 했다(실측 220 회차 중 61% 가 0.50
+	// 초과). 같은 날 그 다리를 제거하면서 관문도 되돌렸다.
 	//
-	// 남은 상한은 1.00 이다. 이진 시장에서 결과 토큰은 최대 1.00 을 지급하므로
-	// 그 이상에 사면 이겨도 손해다 — 그 주문은 어떤 전략에서도 실수다.
-	if full := order.Full(r.Tick.Precision); r.Tick.V >= full {
-		return nil, nil, fmt.Errorf("틱 %d 가 1.00(%d) 이상이다 — 이기고도 손해인 가격이다", r.Tick.V, full)
+	// exec 의 limitTick 이 이미 같은 것을 본다. **두 번 보는 것이 요점이다** —
+	// 여기는 서명 직전이고, 위쪽 상수를 잘못 고치는 날 마지막으로 막는 자리다.
+	if c := order.Ceiling(r.Tick.Precision); r.Tick.V > c.V {
+		return nil, nil, fmt.Errorf("틱 %d 가 0.5 미만 상한 %d 을 넘는다", r.Tick.V, c.V)
 	}
 	priceWei := r.Tick.WeiPerShare()
 

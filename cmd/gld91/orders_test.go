@@ -197,44 +197,47 @@ func TestBuildFailuresAreRetrySafe(t *testing.T) {
 	}
 }
 
-// 1.00 이상에는 절대 걸지 않는다. 이진 시장에서 결과 토큰의 최대 지급액이
-// 1.00 이므로 그 이상에 사면 **이기고도 손해**다 — 어떤 전략에서도 실수다.
-// 서명 직전이 주문이 되기 전 마지막 관문이다.
+// **0.5 이상에는 걸지 않는다.** 사용자 제약이고, 서명 직전이 주문이 되기 전
+// 마지막 관문이다. exec.limitTick 이 이미 같은 것을 보지만 두 번 본다 — 위쪽
+// 상수를 잘못 고치는 날 여기가 막는다.
 //
-// # 여기 있던 0.5 상한은 2026-08-14 에 풀렸다
+// # 이 관문은 2026-08-14 에 잠깐 풀렸다
 //
-// 그날 주문이 두 다리가 됐고, 테이커 다리는 최우선 매도호가 그대로 건다.
-// 실측 220 회차 중 61% 가 0.50 초과였으므로 0.49 로 자르면 그 회차들에서
-// 관통이 관통이 아니라 그냥 대기 주문이 된다(사용자 결정: "푼다 — 호가 그대로
-// 관통"). **메이커 다리의 0.5 제약은 exec.limitTick 에 그대로 살아 있다.**
-func TestBuildRefusesTicksAtOrAboveOne(t *testing.T) {
+// 그날 주문이 두 다리가 됐고 테이커 다리는 최우선 매도호가 그대로 걸었다
+// (실측 220 회차 중 61% 가 0.50 초과). 같은 날 그 다리를 제거하면서 관문도
+// 되돌렸다. 이 시험이 깨지는 날은 다시 푼 날이고, 그것은 전략 변경이다.
+func TestBuildRefusesTicksAtOrAboveHalf(t *testing.T) {
 	s := testSender(t, false, forbiddenServer(t))
-	for _, tick := range []int64{100, 101, 250} {
+	// 0.50 정각부터 예전 테이커가 실제로 걸던 값(0.64), 1.00 이상까지.
+	for _, tick := range []int64{50, 51, 55, 64, 99, 100, 250} {
 		r := testRequest()
 		r.Tick = order.NewTick(tick, 2)
 		if _, _, err := s.build(r); err == nil {
-			t.Errorf("틱 %d(1.00 이상)에 서명했다 — 이기고도 손해인 가격이다", tick)
+			t.Errorf("틱 %d(0.5 이상)에 서명했다", tick)
 		}
 	}
-	// 상한 자체(0.99)는 통과한다.
-	r := testRequest()
-	r.Tick = order.NewTick(99, 2)
-	if _, _, err := s.build(r); err != nil {
-		t.Errorf("상한 틱 99 를 막았다: %v", err)
-	}
-}
-
-// 테이커 다리가 실제로 쓰는 값 — 0.5 를 넘는 매도호가 — 이 서명까지 간다.
-// 이 시험이 깨지는 날은 0.5 관문이 되살아난 날이고, 그러면 테이커 다리가
-// 조용히 대기 주문으로 바뀐다.
-func TestBuildAllowsTakerTicksAboveHalf(t *testing.T) {
-	s := testSender(t, false, forbiddenServer(t))
-	// 실측 분포의 중앙(0.51)부터 관측된 최댓값(0.64)까지.
-	for _, tick := range []int64{50, 51, 55, 64} {
+	// 상한 자체(0.49)는 통과한다.
+	for _, tick := range []int64{48, 49} {
 		r := testRequest()
 		r.Tick = order.NewTick(tick, 2)
 		if _, _, err := s.build(r); err != nil {
-			t.Errorf("틱 %d 를 막았다 — 테이커 다리가 걸지 못한다: %v", tick, err)
+			t.Errorf("틱 %d 를 막았다: %v", tick, err)
+		}
+	}
+	// 정밀도가 커져도 같은 선이다 — 리터럴 49 를 박으면 precision 3 에서
+	// 0.049 위가 전부 막힌다.
+	for _, c := range []struct {
+		tick      int64
+		precision int
+		wantErr   bool
+	}{
+		{480, 3, false}, {499, 3, false}, {500, 3, true}, {640, 3, true},
+	} {
+		r := testRequest()
+		r.Tick = order.NewTick(c.tick, c.precision)
+		_, _, err := s.build(r)
+		if (err != nil) != c.wantErr {
+			t.Errorf("틱 %d/p%d: err=%v, 거부 기대 %v", c.tick, c.precision, err, c.wantErr)
 		}
 	}
 }

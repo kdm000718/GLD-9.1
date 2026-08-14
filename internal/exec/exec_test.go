@@ -499,50 +499,72 @@ func (h *harness) run() error {
 // (1) 회차마다 한 번, 한 가격
 // ---------------------------------------------------------------------------
 
-// 이 봇의 전부다: 회차 시작에 **다리 둘**을 걸고, 끝날 때까지 그대로 둔다.
+// 이 봇의 전부다: 회차 시작에 **지정가 매수 한 건**을 걸고, 끝날 때까지
+// 그대로 둔다.
 //
-//	테이커   최우선 매도호가 그대로 — 즉시 관통해 체결된다
-//	메이커   LimitPrice(0.48) — 시장이 내려와야 체결된다
-//
-// 순서가 중요하다. 테이커가 먼저 걸려야 retireFullyFilled 의 귀속 순서가
-// 실제 체결 순서와 맞는다.
-func TestRoundPlacesBothLegs(t *testing.T) {
+// 2026-08-14 에 테이커 다리가 붙었다가 같은 날 제거됐다. 이 시험이 깨지는 날은
+// 회차당 주문 수가 바뀐 날이고, 그것은 전략 변경이다.
+func TestRoundPlacesExactlyOneOrder(t *testing.T) {
 	h := newHarness(t) // 매도호가 0.60
 	if err := h.run(); err != nil {
 		t.Fatalf("RunRound: %v", err)
 	}
 	ticks := h.orders.createdTicks()
-	if len(ticks) != 2 {
-		t.Fatalf("주문 %d건 (틱 %v) — 회차당 두 건(테이커+메이커)이어야 한다", len(ticks), ticks)
+	if len(ticks) != 1 {
+		t.Fatalf("주문 %d건 (틱 %v) — 회차당 한 건이어야 한다", len(ticks), ticks)
 	}
-	if ticks[0] != 60 {
-		t.Errorf("첫 주문 틱 %d, 기대 60 (최우선 매도호가 그대로 관통)", ticks[0])
-	}
-	if ticks[1] != limitPriceNum {
-		t.Errorf("둘째 주문 틱 %d, 기대 %d (=%v)", ticks[1], limitPriceNum, LimitPrice)
+	if ticks[0] != limitPriceNum {
+		t.Errorf("주문 틱 %d, 기대 %d (=%v)", ticks[0], limitPriceNum, LimitPrice)
 	}
 }
 
-// **두 다리의 명목 합이 회차 상한 미만이어야 한다.** 각 다리는 cap 의 절반을
-// 쓴다(2026-08-14 사용자 결정). 한쪽이 예산을 다 먹으면 다른 쪽이 굶고, 둘 다
-// 안 굶으면서 합이 cap 을 넘으면 사용자 제약이 깨진다.
-func TestLegsSplitTheCap(t *testing.T) {
-	h := newHarness(t) // equity 100 → cap 4.55, 다리당 2.275
+// **테이커 다리가 없다.** 매도호가가 무엇이든 그 값에 거는 주문이 나가면
+// 안 된다 — 2026-08-14 에 제거한 다리가 되살아난 것이다.
+func TestNoOrderFollowsTheAsk(t *testing.T) {
+	for _, ask := range []float64{0.49, 0.53, 0.60, 0.64, 0.95} {
+		h := newHarness(t)
+		h.setCrowd(map[float64]float64{0.30: 100}, map[float64]float64{ask: 100})
+		if err := h.run(); err != nil {
+			t.Fatalf("매도호가 %v: %v", ask, err)
+		}
+		ticks := h.orders.createdTicks()
+		if len(ticks) != 1 || ticks[0] != limitPriceNum {
+			t.Errorf("매도호가 %v: 주문 틱 %v, 기대 [%d] — 호가를 따라간 주문이 있다",
+				ask, ticks, limitPriceNum)
+		}
+	}
+}
+
+// **명목이 회차 상한 미만이어야 한다.** 사용자 제약은 "미만" 이지 "이하" 가
+// 아니다. 다리가 하나로 돌아오면서 그 하나가 cap 전액을 쓴다(2026-08-14
+// 사용자 결정) — 절반씩 쓰던 시절의 여유가 사라졌으므로 경계가 더 빡빡하다.
+func TestOrderStaysUnderTheCap(t *testing.T) {
+	h := newHarness(t) // equity 100 → cap 4.55
 	if err := h.run(); err != nil {
 		t.Fatalf("RunRound: %v", err)
 	}
 	ns := h.orders.createdNotionals()
-	if len(ns) != 2 {
-		t.Fatalf("주문 %d건, 기대 2건", len(ns))
+	if len(ns) != 1 {
+		t.Fatalf("주문 %d건, 기대 1건", len(ns))
 	}
 	cap := risk.Cap(h.equity)
-	for i, n := range ns {
-		if n >= cap*legFraction {
-			t.Errorf("다리 %d 명목 %.4f — 몫 %.4f 미만이어야 한다", i, n, cap*legFraction)
-		}
+	if ns[0] >= cap {
+		t.Errorf("명목 %.4f 가 cap %.4f 이상이다 — 사용자 제약은 미만이다", ns[0], cap)
 	}
-	if total := ns[0] + ns[1]; total >= cap {
-		t.Errorf("명목 합 %.4f 가 cap %.4f 이상이다 — 사용자 제약은 미만이다", total, cap)
+	// **전액을 쓰는지도 본다.** legFraction 이 조용히 0.5 로 돌아가면 위
+	// 검사는 통과하고 노출만 절반이 된다.
+	if ns[0] < cap*0.9 {
+		t.Errorf("명목 %.4f 가 cap %.4f 의 90%% 에도 못 미친다 — 몫이 줄었나(legFraction=%v)",
+			ns[0], cap, legFraction)
+	}
+}
+
+// legFraction 은 사용자가 정한 값이다. 다른 시험들은 전부 이 상수를 참조하므로
+// 값이 바뀌면 조용히 새 값에 맞춰 통과한다 — 여기 한 줄만이 값을 못박는다.
+func TestLegFractionIsWhatTheUserChose(t *testing.T) {
+	const want = 1.0
+	if legFraction != want {
+		t.Fatalf("legFraction = %v, 사용자가 정한 값은 %v (cap 전액)", legFraction, want)
 	}
 }
 
@@ -571,8 +593,8 @@ func TestCrowdMovesButTheOrdersDoNot(t *testing.T) {
 		t.Fatalf("RunRound: %v", err)
 	}
 	ticks := h.orders.createdTicks()
-	if len(ticks) != 2 || ticks[0] != 60 || ticks[1] != limitPriceNum {
-		t.Errorf("주문 틱 %v, 기대 [60 %d] — 군중을 따라갔다. 다리는 회차당 각 한 건뿐이다", ticks, limitPriceNum)
+	if len(ticks) != 1 || ticks[0] != limitPriceNum {
+		t.Errorf("주문 틱 %v, 기대 [%d] — 군중을 따라갔다. 주문은 회차당 한 건뿐이다", ticks, limitPriceNum)
 	}
 	// 취소는 회차 종료 한 번뿐이다. 그보다 많으면 옮긴 것이다.
 	if n := h.orders.removeCount(); n != 1 {
@@ -592,8 +614,8 @@ func TestOrderGoesOutEvenWhenItCrossesTheAsk(t *testing.T) {
 		t.Fatalf("RunRound: %v", err)
 	}
 	ticks := h.orders.createdTicks()
-	if len(ticks) != 2 || ticks[1] != limitPriceNum {
-		t.Errorf("주문 틱 %v, 기대 [40 %d] — 메이커가 매도호가 0.40 을 피해 내려갔다면 관통 방지가 되살아난 것이다", ticks, limitPriceNum)
+	if len(ticks) != 1 || ticks[0] != limitPriceNum {
+		t.Errorf("주문 틱 %v, 기대 [%d] — 매도호가 0.40 을 피해 내려갔다면 관통 방지가 되살아난 것이다", ticks, limitPriceNum)
 	}
 }
 
@@ -671,8 +693,8 @@ func TestInsideTheWindowStillPlaces(t *testing.T) {
 	if err := h.run(); err != nil {
 		t.Fatalf("RunRound: %v", err)
 	}
-	if n := h.orders.createdCount(); n != 2 {
-		t.Errorf("주문 %d건, 기대 2건(테이커+메이커) — 창 안인데 걸지 않았다", n)
+	if n := h.orders.createdCount(); n != 1 {
+		t.Errorf("주문 %d건, 기대 1건 — 창 안인데 걸지 않았다", n)
 	}
 }
 
@@ -944,8 +966,8 @@ func TestInvalidRecordSkipsLineButKeepsExposure(t *testing.T) {
 	if err := h.run(); err != nil {
 		t.Fatalf("ErrInvalidRecord 로 회차가 죽었다: %v", err)
 	}
-	if n := h.orders.createdCount(); n != 2 {
-		t.Errorf("주문 %d건 — 기대 2건. 기록하지 못한 체결도 노출에 남아야 한다", n)
+	if n := h.orders.createdCount(); n != 1 {
+		t.Errorf("주문 %d건 — 기대 1건. 기록하지 못한 체결도 노출에 남아야 한다", n)
 	}
 }
 
@@ -1047,9 +1069,8 @@ func TestRetriesAreBounded(t *testing.T) {
 	if err := h.run(); err != nil {
 		t.Fatalf("RunRound: %v", err)
 	}
-	// 다리마다 상한을 따로 쓰는 것이 아니라, 시도 한 바퀴가 두 다리를 함께
-	// 두드린다 — 그래서 다리별로 정확히 maxPlaceAttempts 회다.
-	for _, tick := range []int64{60, limitPriceNum} {
+	// 시도 한 바퀴가 남은 다리를 두드린다 — 다리별로 정확히 maxPlaceAttempts 회다.
+	for _, tick := range []int64{limitPriceNum} {
 		if n := h.orders.createsAtTick(tick); n != maxPlaceAttempts {
 			t.Errorf("틱 %d 주문 생성 시도 %d회, 기대 %d회", tick, n, maxPlaceAttempts)
 		}
@@ -1193,8 +1214,8 @@ func TestPendingCancelCountsAsExposure(t *testing.T) {
 	if err := h.run(); err == nil {
 		t.Fatal("취소를 확인하지 못한 채 회차가 끝났는데 에러가 아니다")
 	}
-	if n := h.orders.createdCount(); n != 2 {
-		t.Errorf("주문 %d건 — 회차당 두 건이어야 한다", n)
+	if n := h.orders.createdCount(); n != 1 {
+		t.Errorf("주문 %d건 — 회차당 한 건이어야 한다", n)
 	}
 }
 
@@ -1273,8 +1294,8 @@ func TestLoopCancelsAllAtRoundEnd(t *testing.T) {
 	if err := h.run(); err != nil {
 		t.Fatalf("RunRound: %v", err)
 	}
-	if h.orders.createdCount() != 2 {
-		t.Fatalf("주문 %d건, 기대 2건", h.orders.createdCount())
+	if h.orders.createdCount() != 1 {
+		t.Fatalf("주문 %d건, 기대 1건", h.orders.createdCount())
 	}
 	h.orders.mu.Lock()
 	defer h.orders.mu.Unlock()
@@ -1282,8 +1303,8 @@ func TestLoopCancelsAllAtRoundEnd(t *testing.T) {
 		t.Fatal("회차 종료에 취소가 나가지 않았다")
 	}
 	last := h.orders.removes[len(h.orders.removes)-1]
-	if len(last) != 2 || last[0] != "ord-0" || last[1] != "ord-1" {
-		t.Errorf("마지막 취소 = %v, 기대 [ord-0 ord-1] — 두 다리를 함께 거둬야 한다", last)
+	if len(last) != 1 || last[0] != "ord-0" {
+		t.Errorf("마지막 취소 = %v, 기대 [ord-0] — 미체결을 전량 거둬야 한다", last)
 	}
 }
 
@@ -1924,7 +1945,7 @@ func TestFilledOrderBecomingAPositionDoesNotTriggerAnother(t *testing.T) {
 	creates := append([]Request(nil), h.orders.creates...)
 	h.orders.mu.Unlock()
 
-	if len(creates) != 2 {
+	if len(creates) != 1 {
 		var ticks []int64
 		var sum float64
 		for _, r := range creates {
@@ -1965,7 +1986,7 @@ func TestConfirmedCancelThatActuallyFilledKeepsItsNotional(t *testing.T) {
 	if err := h.run(); err != nil && !isDisarm(err) {
 		t.Fatalf("RunRound: %v", err)
 	}
-	if n := h.orders.createdCount(); n != 2 {
+	if n := h.orders.createdCount(); n != 1 {
 		t.Errorf("주문 %d건 — 취소 확인을 '안 찼다'로 읽고 다시 걸었다", n)
 	}
 	if cap := risk.Cap(h.equity); peak > cap+1e-9 {

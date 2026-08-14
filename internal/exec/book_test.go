@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/kdm000718/GLD-9.1/internal/ledger"
 	"github.com/kdm000718/GLD-9.1/internal/predictfun/order"
@@ -124,7 +123,7 @@ func TestLabelMarksMissingSides(t *testing.T) {
 // 2026-08-14 에 테이커 다리가 생기면서 "주문은 책과 무관하다" 는 회차 전체의
 // 불변식이 아니게 됐다. 그 불변식은 **메이커 다리로 좁혀져 여기 남아 있다** —
 // 테이커 쪽은 아래 TestTakerLegFollowsTheAsk 가 반대 방향으로 못 박는다.
-func TestBookNeverChangesTheMakerLeg(t *testing.T) {
+func TestBookNeverChangesTheOrder(t *testing.T) {
 	type shape struct {
 		name       string
 		bids, asks map[float64]float64
@@ -152,97 +151,20 @@ func TestBookNeverChangesTheMakerLeg(t *testing.T) {
 			creates := append([]Request(nil), h.orders.creates...)
 			h.orders.mu.Unlock()
 
-			// 메이커는 **마지막에 나간 주문**이다(다리 순서: 테이커 → 메이커).
-			// 틱으로 고르면 매도호가가 마침 지정가인 모양에서 둘이 겹친다.
-			if len(creates) == 0 {
-				t.Fatalf("%s/%s: 주문이 하나도 나가지 않았다", dir, s.name)
+			// 회차당 주문은 한 건뿐이다. 두 건이 나가면 테이커 다리가
+			// 되살아난 것이고, 그것은 전략 변경이다.
+			if len(creates) != 1 {
+				t.Fatalf("%s/%s: 주문 %d건, 기대 1건 — 호가를 따라간 주문이 있다", dir, s.name, len(creates))
 			}
-			maker := creates[len(creates)-1]
+			maker := creates[0]
 			if maker.Tick.V != limitPriceNum {
-				t.Errorf("%s/%s: 메이커 틱 %d, 기대 %d — 책이 가격을 바꿨다", dir, s.name, maker.Tick.V, limitPriceNum)
+				t.Errorf("%s/%s: 주문 틱 %d, 기대 %d — 책이 가격을 바꿨다", dir, s.name, maker.Tick.V, limitPriceNum)
 			}
-			// 크기도 책과 무관하다. cap 4.55 의 절반 2.275 / 0.48 → 4주.
-			if maker.Shares != 4 {
-				t.Errorf("%s/%s: 메이커 %v주, 기대 4주 — 책이 크기를 바꿨다", dir, s.name, maker.Shares)
+			// 크기도 책과 무관하다. cap 4.55 / 0.48 → 9.48 → 9주.
+			if maker.Shares != 9 {
+				t.Errorf("%s/%s: %v주, 기대 9주 — 책이 크기를 바꿨다", dir, s.name, maker.Shares)
 			}
 		}
-	}
-}
-
-// **테이커 다리는 반대로 책이 정한다.** 2026-08-14 사용자 결정이고, 이 패키지가
-// 오더북을 판단에 쓰는 유일한 자리다.
-//
-// 0.5 상한이 없다는 것도 여기서 못 박는다 — 상한이 되살아나면 매도호가가
-// 0.50 을 넘는 회차(실측 61%)에서 관통이 그냥 대기 주문이 된다.
-func TestTakerLegFollowsTheAsk(t *testing.T) {
-	for _, c := range []struct {
-		name string
-		// Up 기준 책. Down 회차는 거울이 적용된다.
-		bids, asks map[float64]float64
-		dir        string
-		wantTick   int64
-	}{
-		{"Up 매도 0.53", map[float64]float64{0.50: 100}, map[float64]float64{0.53: 100}, ledger.OutcomeUp, 53},
-		{"Up 매도 0.64 (0.5 위)", map[float64]float64{0.60: 100}, map[float64]float64{0.64: 100}, ledger.OutcomeUp, 64},
-		{"Up 매도 0.44 (지정가 아래)", map[float64]float64{0.40: 100}, map[float64]float64{0.44: 100}, ledger.OutcomeUp, 44},
-		// Down 의 매도호가 = Full − Up 매수호가. Up 매수 0.45 → Down 매도 0.55.
-		{"Down 거울", map[float64]float64{0.45: 100}, map[float64]float64{0.59: 100}, ledger.OutcomeDown, 55},
-	} {
-		t.Run(c.name, func(t *testing.T) {
-			h := newHarness(t)
-			h.frozen.Direction = c.dir
-			if c.dir == ledger.OutcomeDown {
-				h.frozen.PUp = 0.47
-			}
-			h.setCrowd(c.bids, c.asks)
-			if err := h.run(); err != nil {
-				t.Fatalf("RunRound: %v", err)
-			}
-			ticks := h.orders.createdTicks()
-			if len(ticks) != 2 {
-				t.Fatalf("주문 %d건(틱 %v), 기대 2건", len(ticks), ticks)
-			}
-			if ticks[0] != c.wantTick {
-				t.Errorf("테이커 틱 %d, 기대 %d — 최우선 매도호가 그대로 걸어야 한다", ticks[0], c.wantTick)
-			}
-		})
-	}
-}
-
-// 매도호가를 모르면 테이커 다리를 걸지 않는다. 얼마에 사는지 모르고 관통하는
-// 것이므로, 이 패키지의 실패 방향(애매하면 거래하지 않는다)을 따른다.
-func TestNoAskMeansNoTakerLeg(t *testing.T) {
-	h := newHarness(t)
-	h.setCrowd(map[float64]float64{0.45: 100}, nil) // 매도측이 비었다
-	var why string
-	h.runner.Log = func(format string, args ...any) {
-		if line := fmt.Sprintf(format, args...); strings.Contains(line, "테이커 다리를 걸지 않는다") {
-			why = line
-		}
-	}
-	if err := h.run(); err != nil {
-		t.Fatalf("RunRound: %v", err)
-	}
-	ticks := h.orders.createdTicks()
-	if len(ticks) != 1 || ticks[0] != limitPriceNum {
-		t.Fatalf("주문 틱 %v, 기대 [%d] — 매도호가가 없는데 테이커를 걸었다", ticks, limitPriceNum)
-	}
-	if why == "" {
-		t.Error("테이커 다리를 건너뛴 이유가 로그에 없다 — 처음부터 없었던 회차와 구분되지 않는다")
-	}
-}
-
-// 낡은 호가창도 마찬가지다. 낡은 값으로 관통하면 몇 초 전 가격에 사는 것이다.
-func TestStaleBookMeansNoTakerLeg(t *testing.T) {
-	h := newHarness(t)
-	h.autoBook = false // 갱신을 멈춰 책을 늙힌다
-	h.clk.advanceMono(4 * time.Second)
-	if err := h.run(); err != nil {
-		t.Fatalf("RunRound: %v", err)
-	}
-	ticks := h.orders.createdTicks()
-	if len(ticks) != 1 || ticks[0] != limitPriceNum {
-		t.Fatalf("주문 틱 %v, 기대 [%d] — 낡은 호가창으로 관통했다", ticks, limitPriceNum)
 	}
 }
 
@@ -291,6 +213,24 @@ func TestLimitTickAgreesWithTheOrderLayer(t *testing.T) {
 		}
 		if order.NewTick(tk.V, p).Float() != LimitPrice {
 			t.Errorf("precision %d: 틱 %d 가 %v 가 아니다", p, tk.V, LimitPrice)
+		}
+	}
+}
+
+// **책이 아무리 움직여도 나가는 주문은 하나, 같은 틱이다.**
+//
+// 2026-08-14 에 테이커 다리가 잠깐 이 파일의 값을 읽어 가격을 정했다. 같은 날
+// 제거됐고, 이 시험이 그 경로가 되살아나지 않았음을 지킨다.
+func TestBookNeverAddsASecondOrder(t *testing.T) {
+	for _, ask := range []float64{0.20, 0.40, 0.48, 0.49, 0.55, 0.64, 0.99} {
+		h := newHarness(t)
+		h.setCrowd(map[float64]float64{0.10: 100}, map[float64]float64{ask: 100})
+		if err := h.run(); err != nil {
+			t.Fatalf("매도호가 %v: %v", ask, err)
+		}
+		ticks := h.orders.createdTicks()
+		if len(ticks) != 1 || ticks[0] != limitPriceNum {
+			t.Errorf("매도호가 %v: 틱 %v, 기대 [%d]", ask, ticks, limitPriceNum)
 		}
 	}
 }
