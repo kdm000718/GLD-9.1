@@ -14,7 +14,7 @@ import (
 
 // 이 파일이 지키는 것 셋:
 //
-//	(1) 켜진 시각이 **정확히** 사용자가 고른 12개다
+//	(1) 켜진 시각이 **정확히** 사용자가 고른 24개다
 //	(2) 판정이 UTC 로 이뤄진다 — 서버는 도쿄(UTC+9)에 있다
 //	(3) 관문이 배선돼 있다 — 함수가 맞아도 호출부가 없으면 아무 일도 안 난다
 
@@ -22,10 +22,11 @@ import (
 // 읽어 비교하면 아무것도 검증하지 못한다 — 두 곳이 같은 실수를 하려면 사람이
 // 두 번 고쳐야 한다.
 //
-// 2026년 문턱 0.0714 통과분에서 판정 승률이 손익분기(52.70%) 아래로 나온 넷이다.
-var excluded = []int{6, 7, 10, 12}
+// 2026-08-16 사용자 결정으로 제외가 없다. 시간대 선택이 과최적화였다는 것이
+// 확인됐다(hours.go 주석 참고). 다시 제한하려면 여기와 hours.go 를 함께 고쳐라.
+var excluded = []int{}
 
-// chosen 은 그 나머지 20개다.
+// chosen 은 그 나머지 — 지금은 24개 전부다.
 var chosen = func() []int {
 	var out []int
 	for h := 0; h < 24; h++ {
@@ -46,7 +47,7 @@ var chosen = func() []int {
 var errFake = errors.New("가짜 실패")
 
 func TestTradingHoursAreExactlyWhatTheUserChose(t *testing.T) {
-	if len(chosen) != 20 {
+	if len(chosen) != 24-len(excluded) {
 		t.Fatalf("켜진 시각이 %d개여야 한다 (24 − 제외 %d)", 24-len(excluded), len(excluded))
 	}
 	var on []int
@@ -84,7 +85,9 @@ func TestTradingHourCoversEveryHour(t *testing.T) {
 // **시(hour) 안쪽은 전부 같은 판정이다.** 5분봉이므로 한 시각에 회차가 12개
 // 들어온다 — 그중 하나만 다르게 판정되면 그 회차만 조용히 빠지거나 끼어든다.
 func TestEveryRoundInsideAnHourAgrees(t *testing.T) {
-	for _, h := range []int{2, 6} { // 켜진 시각 하나, 꺼진 시각 하나
+	// **24시간 전부를 밟는다.** 표가 균일한 동안에는 몇 시각만 골라도 통과하고,
+	// 나중에 다시 시간대를 끄면 그 자리의 경계 오류가 살아남는다.
+	for h := 0; h < 24; h++ {
 		want := tradingHour(time.Date(2026, 8, 14, h, 0, 0, 0, time.UTC))
 		for m := 0; m < 60; m += 5 {
 			at := time.Date(2026, 8, 14, h, m, 0, 0, time.UTC)
@@ -102,45 +105,42 @@ func TestEveryRoundInsideAnHourAgrees(t *testing.T) {
 // **UTC 로 잰다.** 서버는 도쿄(UTC+9)에 있다. 로컬 시로 재면 정책이 통째로
 // 9시간 밀리고, 그 사실은 로그만 봐서는 드러나지 않는다 — 봇은 조용히
 // "11시" 에 걸고 있다고 말하면서 실제로는 02시에 건다.
+// **첨자로 잰다.** 표가 24개 전부 true 인 동안에는 tradingHour 의 답만 봐서는
+// UTC 로 쟀는지 알 수 없다 — 로컬 시로 재도 답이 같기 때문이다. 그래서
+// [tradingHourIndex] 를 직접 본다. 이 시험은 표의 내용과 무관하게 유효하다.
 func TestTradingHourIgnoresTheLocation(t *testing.T) {
-	tokyo := time.FixedZone("JST", 9*3600)
-	// **로컬 시로 쟀을 때와 답이 갈리는 시각만 고른다.** 둘이 같은 시각을
-	// 고르면 UTC 로 재지 않아도 통과한다.
-	for _, c := range []struct {
-		jst  int
-		utc  int
-		want bool
+	for _, z := range []struct {
+		name   string
+		offset int
 	}{
-		{jst: 15, utc: 6, want: false},  // 로컬 15시는 켜짐, UTC 06시는 꺼짐
-		{jst: 16, utc: 7, want: false},  // 로컬 16시는 켜짐, UTC 07시는 꺼짐
-		{jst: 19, utc: 10, want: false}, // 로컬 19시는 켜짐, UTC 10시는 꺼짐
-		{jst: 21, utc: 12, want: false}, // 로컬 21시는 켜짐, UTC 12시는 꺼짐
-		{jst: 6, utc: 21, want: true},   // 로컬 06시는 꺼짐, UTC 21시는 켜짐
-		{jst: 7, utc: 22, want: true},   // 로컬 07시는 꺼짐, UTC 22시는 켜짐
-		{jst: 12, utc: 3, want: true},   // 로컬 12시는 꺼짐, UTC 03시는 켜짐
-		{jst: 10, utc: 1, want: true},   // 로컬 10시는 꺼짐, UTC 01시는 켜짐
+		{"JST(도쿄, 서버 위치)", 9 * 3600},
+		{"KST(서울)", 9 * 3600},
+		{"EST", -5 * 3600},
+		{"IST(+5:30, 30분 오프셋)", 5*3600 + 1800},
+		{"UTC", 0},
 	} {
-		at := time.Date(2026, 8, 14, c.jst, 30, 0, 0, tokyo)
-		if got := at.UTC().Hour(); got != c.utc {
-			t.Fatalf("%02d:30 JST 의 UTC 시각이 %02d 다 — 표가 틀렸다", c.jst, got)
-		}
-		if got := tradingHour(at); got != c.want {
-			t.Errorf("%02d:30 JST (= UTC %02d시): %v, 기대 %v — UTC 로 재지 않았다",
-				c.jst, c.utc, got, c.want)
+		loc := time.FixedZone(z.name, z.offset)
+		for h := 0; h < 24; h++ {
+			at := time.Date(2026, 8, 14, h, 30, 0, 0, loc)
+			want := at.UTC().Hour()
+			if got := tradingHourIndex(at); got != want {
+				t.Errorf("%s %02d:30 → 첨자 %d, 기대 %d — UTC 로 재지 않았다",
+					z.name, h, got, want)
+			}
+			// 로컬 시를 그대로 쓰면 오프셋이 0 이 아닌 곳에서 반드시 갈린다.
+			if z.offset != 0 && tradingHourIndex(at) == h && at.UTC().Hour() != h {
+				t.Errorf("%s %02d:30 → 로컬 시 %d 를 그대로 썼다", z.name, h, h)
+			}
 		}
 	}
-	// 위 표에 **판정이 갈리는 시각이 실제로 들어 있는지** 확인한다. 전부
-	// 겹치는 시각뿐이면 이 시험은 아무것도 막지 못한다.
-	split := 0
-	for _, c := range []struct{ jst, utc int }{
-		{15, 6}, {16, 7}, {19, 10}, {21, 12}, {6, 21}, {7, 22}, {12, 3}, {10, 1},
-	} {
-		if tradingHours[c.jst] != tradingHours[c.utc] {
-			split++
+	// 배선도 본다 — 첨자가 맞아도 tradingHour 가 그것을 쓰지 않으면 의미가 없다.
+	tokyo := time.FixedZone("JST", 9*3600)
+	for h := 0; h < 24; h++ {
+		at := time.Date(2026, 8, 14, h, 30, 0, 0, tokyo)
+		if got, want := tradingHour(at), tradingHours[at.UTC().Hour()]; got != want {
+			t.Errorf("JST %02d:30: tradingHour=%v, 표의 UTC %02d시 칸은 %v",
+				h, got, at.UTC().Hour(), want)
 		}
-	}
-	if split < 4 {
-		t.Fatalf("로컬/UTC 판정이 갈리는 표본이 %d개뿐이다 — 표를 고쳐라", split)
 	}
 }
 

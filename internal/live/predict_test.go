@@ -47,17 +47,19 @@ func TestFrozenIsAValueNotAReference(t *testing.T) {
 
 // --- 문턱 ---
 
-// confidence = 2×|p−0.5|. 문턱 0.0714 (p_up ≥ 0.5357 또는 ≤ 0.4643).
+// confidence = 2×|p−0.5|. 문턱 0.14 (p_up ≥ 0.57 또는 ≤ 0.43).
 func TestEligibleThreshold(t *testing.T) {
 	cases := []struct {
 		pUp  float64
 		want bool
 	}{
-		{0.5358, true},  // conf = 0.0716000000000001… ≥ 0.0714
-		{0.5357, false}, // conf = 0.0713999999999999… < 0.0714 (아래 대칭 시험 참고)
-		{0.4643, true},  // conf = 0.0714000000000000… ≥ 0.0714
-		{0.4644, false}, // conf = 0.0712000000000000… < 0.0714
-		{0.52, false},   // conf 0.04 — 예전 문턱(0.0172)에서는 통과했다
+		{0.5701, true},  // conf = 0.1402000000000001… ≥ 0.14
+		{0.57, false},   // conf = 0.1399999999999999… < 0.14 (아래 대칭 시험 참고)
+		{0.43, true},    // conf = 0.1400000000000000… ≥ 0.14
+		{0.4301, false}, // conf = 0.1398000000000000… < 0.14
+		{0.5358, false}, // conf 0.0716 — 예전 문턱(0.0714)에서는 통과했다
+		{0.4643, false}, // conf 0.0714
+		{0.52, false},   // conf 0.04 — 그 이전 문턱(0.0172)에서는 통과했다
 		{0.48, false},   // conf 0.04
 		{0.5, false},
 		{0.501, false},
@@ -95,8 +97,8 @@ func TestEligibleIsInclusiveAtThreshold(t *testing.T) {
 
 // **문턱은 십진수로 대칭이 아니다(실측).**
 //
-// p=0.5357 과 p=0.4643 은 십진수로는 둘 다 confidence 0.0714 지만, float64 로는
-// 앞이 0.071399999999999908, 뒤가 0.071400000000000019 다 — **뒤만 통과한다.**
+// p=0.57 과 p=0.43 은 십진수로는 둘 다 confidence 0.14 지만, float64 로는
+// 앞이 0.13999999999999990, 뒤가 0.14000000000000001 다 — **뒤만 통과한다.**
 // 문턱 0.0172 시절에는 반대였다(Up 쪽만 통과). 어느 쪽이 관대한지는 문턱 값에
 // 따라 바뀌고, 그것이 이 시험이 값을 박아 두는 이유다.
 //
@@ -105,13 +107,13 @@ func TestEligibleIsInclusiveAtThreshold(t *testing.T) {
 // 결함으로 오해해 엡실론을 넣지 않도록, 그리고 십진 경계값으로 이 문턱을
 // 시험하려는 시도가 왜 실패하는지 남기려고.
 func TestThresholdIsNotDecimalSymmetric(t *testing.T) {
-	up := newFrozen(roundT, 0.5357)
-	down := newFrozen(roundT, 0.4643)
+	up := newFrozen(roundT, 0.57)
+	down := newFrozen(roundT, 0.43)
 	if up.Eligible {
-		t.Errorf("p=0.5357 이 통과했다 (conf=%.17g) — float64 표현이 바뀌었나", up.Confidence)
+		t.Errorf("p=0.57 이 통과했다 (conf=%.17g) — float64 표현이 바뀌었나", up.Confidence)
 	}
 	if !down.Eligible {
-		t.Errorf("p=0.4643 이 기각됐다 (conf=%.17g)", down.Confidence)
+		t.Errorf("p=0.43 이 기각됐다 (conf=%.17g)", down.Confidence)
 	}
 }
 
