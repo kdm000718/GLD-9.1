@@ -197,41 +197,45 @@ func TestBuildFailuresAreRetrySafe(t *testing.T) {
 	}
 }
 
-// **0.5 이상에는 걸지 않는다.** 사용자 제약이고, 서명 직전이 주문이 되기 전
-// 마지막 관문이다. exec.limitTick 이 이미 같은 것을 보지만 두 번 본다 — 위쪽
-// 상수를 잘못 고치는 날 여기가 막는다.
+// **1.00 이상에는 걸지 않는다.** 1.00 은 이겨도 본전이고 그 위는 이겨도 손해다.
+// 서명 직전이 주문이 되기 전 마지막 관문이다.
 //
-// # 이 관문은 2026-08-14 에 잠깐 풀렸다
+// # 0.5 상한은 2026-08-16 에 사라졌다
 //
-// 그날 주문이 두 다리가 됐고 테이커 다리는 최우선 매도호가 그대로 걸었다
-// (실측 220 회차 중 61% 가 0.50 초과). 같은 날 그 다리를 제거하면서 관문도
-// 되돌렸다. 이 시험이 깨지는 날은 다시 푼 날이고, 그것은 전략 변경이다.
-func TestBuildRefusesTicksAtOrAboveHalf(t *testing.T) {
+// 원래 이 자리는 0.5 미만만 통과시켰다. 2026-08-14 에 테이커 다리를 위해 잠깐
+// 풀렸다가 같은 날 되돌아왔고, 2026-08-16 에 최우선 매수호가 방식으로 바뀌면서
+// **영구히 없어졌다**(사용자 결정). 최우선호가는 62% 의 회차에서 0.50 이상이라
+// 상한을 두면 그 회차들이 전부 0.49 로 끌려 내려간다.
+//
+// **이 시험이 0.5 로 되돌아가는 날은 전략이 되돌아간 날이다.**
+func TestBuildRefusesTicksAtOrAboveOne(t *testing.T) {
 	s := testSender(t, false, forbiddenServer(t))
-	// 0.50 정각부터 예전 테이커가 실제로 걸던 값(0.64), 1.00 이상까지.
-	for _, tick := range []int64{50, 51, 55, 64, 99, 100, 250} {
+	// 1.00 정각과 그 위.
+	for _, tick := range []int64{100, 101, 150, 250} {
 		r := testRequest()
 		r.Tick = order.NewTick(tick, 2)
 		if _, _, err := s.build(r); err == nil {
-			t.Errorf("틱 %d(0.5 이상)에 서명했다", tick)
+			t.Errorf("틱 %d(1.00 이상)에 서명했다", tick)
 		}
 	}
-	// 상한 자체(0.49)는 통과한다.
-	for _, tick := range []int64{48, 49} {
+	// **0.50 이상 0.99 이하는 통과한다** — 이것이 2026-08-16 변경의 핵심이다.
+	// 0.48/0.49 만 시험하면 상한을 0.5 로 되돌려도 통과한다.
+	for _, tick := range []int64{48, 49, 50, 51, 55, 64, 68, 99} {
 		r := testRequest()
 		r.Tick = order.NewTick(tick, 2)
 		if _, _, err := s.build(r); err != nil {
-			t.Errorf("틱 %d 를 막았다: %v", tick, err)
+			t.Errorf("틱 %d 를 막았다: %v — 0.5 상한이 되살아났나", tick, err)
 		}
 	}
-	// 정밀도가 커져도 같은 선이다 — 리터럴 49 를 박으면 precision 3 에서
-	// 0.049 위가 전부 막힌다.
+	// 정밀도가 커져도 같은 선이다 — 리터럴 100 을 박으면 precision 3 에서
+	// 0.100 위가 전부 막힌다.
 	for _, c := range []struct {
 		tick      int64
 		precision int
 		wantErr   bool
 	}{
-		{480, 3, false}, {499, 3, false}, {500, 3, true}, {640, 3, true},
+		{480, 3, false}, {499, 3, false}, {500, 3, false}, {640, 3, false},
+		{999, 3, false}, {1000, 3, true}, {1500, 3, true},
 	} {
 		r := testRequest()
 		r.Tick = order.NewTick(c.tick, c.precision)

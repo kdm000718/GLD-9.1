@@ -207,17 +207,24 @@ func (s *orderSender) build(r exec.Request) (body map[string]any, envelope []byt
 	if r.Tick.Precision < 1 || r.Tick.Precision > 18 {
 		return nil, nil, fmt.Errorf("틱 precision 이 %d 다", r.Tick.Precision)
 	}
-	// **0.5 미만 지정가 매수만** 은 사용자 제약이다. 이기고도 본전 근처인
-	// 가격에 사는 주문은 어떤 전략에서도 실수다.
+	// **1.00 미만이어야 한다.** 1.00 은 "이겨도 본전" 이고 그 위는 이겨도 손해다.
+	// 어떤 전략에서도 실수이므로 여기서 막는다.
 	//
-	// 이 관문은 2026-08-14 에 잠깐 풀렸다 — 그날 테이커 다리가 생겼고, 그
-	// 다리는 최우선 매도호가 그대로 걸어야 했다(실측 220 회차 중 61% 가 0.50
-	// 초과). 같은 날 그 다리를 제거하면서 관문도 되돌렸다.
+	// # 0.5 미만 제약은 없어졌다
 	//
-	// exec 의 limitTick 이 이미 같은 것을 본다. **두 번 보는 것이 요점이다** —
-	// 여기는 서명 직전이고, 위쪽 상수를 잘못 고치는 날 마지막으로 막는 자리다.
-	if c := order.Ceiling(r.Tick.Precision); r.Tick.V > c.V {
-		return nil, nil, fmt.Errorf("틱 %d 가 0.5 미만 상한 %d 을 넘는다", r.Tick.V, c.V)
+	// 원래 여기는 `order.Ceiling`(0.5 미만) 을 봤다. 그 제약은 2026-08-14 에
+	// 테이커 다리를 위해 잠깐 풀렸다가 같은 날 되돌아왔고, 2026-08-16 에
+	// **최우선 매수호가 방식으로 바뀌면서 영구히 사라졌다**(사용자 결정).
+	//
+	// 최우선 매수호가는 62% 의 회차에서 0.50 이상이다. 우리가 사려는 쪽은 모델이
+	// 유리하다고 본 쪽이고 시장도 대체로 그렇게 보기 때문이다. 0.49 로 끌어내리면
+	// 체결률이 95.6% → 87.7% 로 떨어진다(오더북 1,406회차 실측).
+	//
+	// **그 대가로 안전장치가 하나 사라졌다.** 판정 승률이 손익분기 아래로 내려가면
+	// 즉시 적자가 되는데, 예전에는 0.5 상한이 그 손실 폭을 묶어 줬다. 지금은
+	// 문턱(`live.ConfidenceThreshold`)만이 그 역할을 한다.
+	if full := order.Full(r.Tick.Precision); r.Tick.V >= full {
+		return nil, nil, fmt.Errorf("틱 %d 가 1.00 (틱 %d) 이상이다 — 이겨도 손해다", r.Tick.V, full)
 	}
 	priceWei := r.Tick.WeiPerShare()
 
