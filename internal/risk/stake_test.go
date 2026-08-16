@@ -74,9 +74,6 @@ func TestConfidenceWeightRefusesBrokenInput(t *testing.T) {
 
 // 확신이 커질수록 크게 건다. 뒤집히면 모델이 덜 확신하는 자리에 더 크게 거는
 // 봇이 되고, 그것은 에러 없이 매 회차 조용히 손해를 키운다.
-//
-// **가중치는 엄격히 증가하고, 목표는 약하게 증가한다** — [MinStakeUSD] 바닥이
-// 아래 두 칸을 같은 값으로 눌러 붙이기 때문이다. 뒤집히는 것만 막으면 된다.
 func TestConfidenceWeightIsMonotone(t *testing.T) {
 	prev := -1.0
 	for i, w := range confWeights {
@@ -110,62 +107,25 @@ func TestStakeTargetNeverExceedsMax(t *testing.T) {
 	}
 }
 
-// **모든 칸이 최소 주문을 넘는다 = 실효 문턱이 [live.ConfidenceThreshold] 와
-// 같다.**
+// **실효 문턱이 어디인지 못 박는다.**
 //
-// [MinStakeUSD] 바닥이 하는 일이 이것이다. 이 시험이 깨지는 날은 어떤 칸이
-// 조용히 사라진 날이고, 그때 바뀌는 것은 크기만이 아니라 "어떤 회차에
-// 들어가는가" 다.
-func TestEveryBinClearsTheMinimumOrder(t *testing.T) {
-	for i, lo := range confBins {
-		if got := StakeTarget(lo); got < MinOrderUSD {
-			t.Errorf("%d번째 칸(conf %v)의 목표가 %v 로 최소 주문 %v 미만이다 — "+
-				"그 칸은 통째로 사라진다", i, lo, got, MinOrderUSD)
+// 목표가 [MinOrderUSD] 미만인 칸은 주문이 성립하지 않는다. [MaxStakeUSD] 를
+// 바꾸면 실효 문턱이 함께 움직이므로, 그 사실이 시험에 남아 있어야 한다.
+// 지금 값(5 USDT)에서는 앞 두 칸이 잘리고 **실효 문턱은 0.14** 다.
+//
+// 이 시험이 깨지는 날은 상한을 바꾼 날이고, 그때 바뀌는 것은 크기만이 아니라
+// "어떤 회차에 들어가는가" 다. 그래서 조용히 지나가면 안 된다.
+func TestSmallStakesFallBelowTheMinimumOrder(t *testing.T) {
+	// 나가지 못하는 칸
+	for _, c := range []float64{0.10, 0.12, 0.135} {
+		if got := StakeTarget(c); got >= MinOrderUSD {
+			t.Errorf("conf %v 의 목표가 %v 다 — 최소 주문 이상이면 실효 문턱이 내려간 것이고, "+
+				"이 시험의 전제가 바뀌었다", c, got)
 		}
 	}
-	if MinStakeUSD < MinOrderUSD {
-		t.Errorf("MinStakeUSD %v 가 거래소 최소 주문 %v 보다 작다 — 바닥이 바닥 노릇을 못 한다",
-			MinStakeUSD, MinOrderUSD)
-	}
-	if MinStakeUSD > MaxStakeUSD {
-		t.Fatalf("바닥 %v 가 상한 %v 보다 크다", MinStakeUSD, MaxStakeUSD)
-	}
-}
-
-// **바닥은 걸기로 한 회차에만 깔린다.** 문턱 아래 회차가 바닥값을 받으면
-// "걸지 않기로 한 회차" 가 최소 주문짜리 베팅이 된다 — 문턱이 무력화된다.
-func TestFloorDoesNotResurrectSkippedRounds(t *testing.T) {
-	for _, c := range []float64{0, 0.0172, 0.05, 0.0999} {
-		if got := StakeTarget(c); got != 0 {
-			t.Errorf("conf %v: %v, 기대 0 — 바닥이 문턱을 넘어섰다", c, got)
-		}
-	}
-	if got := StakeTarget(math.NaN()); got != 0 {
-		t.Errorf("NaN 이 %v 를 받았다", got)
-	}
-}
-
-// 바닥이 실제로 두 칸을 눌러 붙였는지 본다. 이 값들은 켈리 비례보다 크므로
-// **그 칸에서는 켈리를 초과해 건다** — stake.go 의 [MinStakeUSD] 주석 참고.
-func TestFloorLiftsTheTwoLowestBins(t *testing.T) {
-	for _, c := range []struct {
-		conf   float64
-		kelly  float64 // 바닥이 없었다면
-		want   float64
-		lifted bool
-	}{
-		{0.10, MaxStakeUSD * 0.0792, MinStakeUSD, true},
-		{0.12, MaxStakeUSD * 0.1891, MinStakeUSD, true},
-		{0.14, MaxStakeUSD * 0.3479, MaxStakeUSD * 0.3479, false},
-		{0.30, MaxStakeUSD, MaxStakeUSD, false},
-	} {
-		got := StakeTarget(c.conf)
-		if math.Abs(got-c.want) > 1e-12 {
-			t.Errorf("conf %v: %v, 기대 %v", c.conf, got, c.want)
-		}
-		if lifted := got > c.kelly+1e-12; lifted != c.lifted {
-			t.Errorf("conf %v: 바닥 적용 %v, 기대 %v (켈리 비례 %v)", c.conf, lifted, c.lifted, c.kelly)
-		}
+	// 나가는 첫 칸 — 여기가 실효 문턱이다
+	if got := StakeTarget(0.14); got < MinOrderUSD {
+		t.Errorf("conf 0.14 의 목표가 %v 로 최소 주문 미만이다 — 실효 문턱이 0.16 으로 올라갔다", got)
 	}
 }
 
