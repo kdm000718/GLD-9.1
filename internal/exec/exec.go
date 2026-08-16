@@ -3,7 +3,7 @@
 //
 // # 회차마다 한 다리, 한 번
 //
-//	메이커   주문 시점의 **최우선 매수호가**([Runner.bestBidTick]).
+//	메이커   상수 [LimitPrice]. 시장이 그 값까지 내려와야 체결된다.
 //
 // 크기는 **확신도가 정하고 상한이 자른다**([legBudget]). 목표는
 // [risk.StakeTarget](confidence) 이고, 그 값이 equity × [risk.CapFraction]
@@ -68,11 +68,12 @@
 // 값을 감당할 수 없다 — 손익분기 52.8% 를 구조적으로 못 넘는다. 사용자 결정으로
 // 제거했다.
 //
-// # 오더북이 가격을 정한다 — 2026-08-16 부터
+// # 오더북은 다시 기록 전용이다 — 2026-08-17 부터
 //
-// 그전까지 오더북은 로그([Runner.marketNote])에만 쓰였고, book.go 가 그것을
-// 불변식으로 못 박고 있었다. 지금은 **[Runner.bestBidTick] 하나가 그 경로다.**
-// 다른 자리에서 책을 읽어 가격이나 수량을 정하면 그것은 또 다른 전략 변경이다.
+// 2026-08-16 하루 동안만 오더북이 가격을 정했다(그 함수는 지금
+// 없다). 지금 가격은 상수 [LimitPrice] 이고, 책은 로그([Runner.marketNote])와
+// 기록에만 쓴다. **어떤 자리에서도 책을 읽어 가격이나 수량을 정하지 않는다** —
+// book_test.go 가 그것을 불변식으로 못 박는다.
 //
 // 크기는 여전히 `internal/risk` 가 정한다 — 책과 무관하다.
 //
@@ -246,117 +247,129 @@ type retryClassifier interface{ SafeToRetry() bool }
 // 지정가 — 이 봇이 거는 유일한 가격
 // ---------------------------------------------------------------------------
 
-// 이 봇은 **주문 시점의 최우선 매수호가에 나란히 선다.** 고정 지정가는
-// 2026-08-16 에 사라졌다(사용자 결정).
+const (
+	limitPriceNum = 47
+	limitPriceDen = 100
+)
+
+// LimitPrice 는 이 봇이 매수호가를 거는 가격이다. 회차마다 이 가격에 한 번만
+// 건다.
 //
-// # 왜 바꿨나 — 고정가는 역선택을 피하지 못했다
+// **상수인 것이 요점이다.** 플래그로 빼면 운영 중에 값이 바뀔 수 있고, 그러면
+// 원장의 어떤 줄이 어떤 가격 정책으로 나갔는지 사후에 알 수 없다(2026-08-12
+// 사용자 결정). 바꾸려면 이 줄을 고치고 다시 빌드해 배포해야 한다.
+//
+// # 값의 이력
 //
 //	0.47   ~2026-08-14   216회차 실측: 체결분 승률 49.5%, 손익분기 47.7%
 //	0.46    2026-08-14    99회차 실측: 체결분 승률 36.4%, 손익분기 47.0%
 //	0.48    2026-08-14    사용자 결정
-//	최우선  2026-08-16~   사용자 결정
+//	최우선  2026-08-16    호가창에서 읽었다.
+//	0.47    2026-08-17~  사용자 결정. 아래 참고.
 //
-// 0.46 으로 1틱 내렸을 때 승률이 13.1%p 무너졌다. 지정가를 낮출수록 "시장이
-// 거기까지 밀려온 회차" 만 체결되고 그건 우리 방향이 틀렸을 때다. 그래서 반대로
-// 0.48 까지 올렸는데, 오더북 원본 1,406회차(07-29~08-06)로 재 보니 그 방향이
-// 맞았다:
+// # 왜 최우선호가에서 다시 고정가로 돌아왔나
 //
-//	                     체결률   평균 진입가   회차당 EV(문턱 0.14, 8일)
-//	0.48 고정             87.7%    0.4787       +11.5%
-//	최우선호가·0.49 상한   87.7%    0.4785       +13.3%
-//	최우선호가·상한 없음   95.6%    0.4965       +13.2%
+// 오더북 1,714회차(07-29~08-06)로 두 방식을 나란히 재면:
 //
-// # 0.5 미만 상한을 뺀 이유
+//	                 체결률   평균 진입가   P(체결|승)   P(체결|패)   손익분기 j*
+//	0.47 고정        84.0%    0.4691       77.99%     99.76%      54.01%
+//	최우선 매수호가   93.3%    0.5029       89.10%    100.00%      54.18%
 //
-// **최우선 매수호가는 62% 의 회차에서 0.50 이상이다.** 우리가 사려는 쪽은
-// 모델이 유리하다고 본 쪽이고 시장도 대체로 그렇게 본다. 상한을 두면 그 62%
-// 가 0.49 로 끌려 내려가는데, 그건 체결이 안 되는 쪽으로 미는 것이다 —
-// 위 표에서 체결률이 95.6% → 87.7% 로 떨어지는 것이 그 대가다.
+// 손익분기는 0.17%p 차이로 사실상 같고, 두 방식의 회차당 수익 차이는
+// −1.43% ± 3.45% (t = −0.42) — **표본이 구분하지 못한다.**
 //
-// 대신 **0.50 이상에도 매수하게 된다.** 설계 초기의 "기댓값 2배 미만인 자리는
-// 사지 않는다" 는 제약이 여기서 사라졌다(2026-08-16 사용자 결정). 판정 승률이
-// 손익분기 아래로 내려가면 즉시 적자가 되고, 그 안전장치가 없다.
+// 구분되는 것은 **배당**이다. 0.47 은 이기면 0.98/0.4691 − 1 = 1.089배,
+// 최우선호가는 0.949배다. 크기를 켈리에 비례시키는 지금
+// ([risk.StakeTarget]) 배당이 크기 계산에 직접 들어가므로, 실제로 내는
+// 가격과 계산에 쓴 배당이 같아야 한다. 그 일치를 위해 가격을 고정으로
+// 되돌렸다.
 //
-// # 이 값을 결정에 쓰는 유일한 자리다
+// # 왜 낮추지 않는가
 //
-// book.go 는 오랫동안 "기록 전용" 이었다. 2026-08-16 부터 **오더북이 가격을
-// 정한다** — 그 경로가 [bestBidTick] 하나뿐임을 book_test.go 가 못 박는다.
+// 0.46 으로 1틱 내렸을 때 승률이 13.1%p 무너졌다. **역선택이다** — 지정가를
+// 낮출수록 "시장이 거기까지 밀려온 회차" 만 체결되고, 그건 우리 방향이 틀렸을
+// 때다. 오더북으로 지정가를 훑어도 같은 그림이다: 0.42 까지 내려도 P(체결|패)
+// 는 96.6% 로 붙박이고 P(체결|승) 만 76.1% → 60.9% 로 떨어진다. **가격 이득이
+// 역선택으로 정확히 상쇄되어** 손익분기는 어느 지정가에서도 52.8~55.1% 안에서만
+// 움직인다.
+//
+// 판단에 쓰지 않는다 — 실제 틱은 [limitTick] 이 정수로 만든다. 이 값은 로그와
+// 문서용이다.
+const LimitPrice = float64(limitPriceNum) / float64(limitPriceDen)
 
-// legFraction 은 한 다리가 쓸 수 있는 명목의 비율이다 — [risk.CapFraction] 대비.
+// limitTick 은 이 회차의 정밀도에서 [LimitPrice] 에 해당하는 틱이다.
+//
+// 두 가지를 막는다:
+//
+//	표현 불가   정밀도 1 인 마켓에서 0.47 은 존재하지 않는 가격이다. 0.4 나
+//	            0.5 로 반올림해 주면 **사용자가 정하지 않은 가격에 건다.**
+//	0.5 이상    누군가 [limitPriceNum] 을 0.5 이상으로 고치는 날, 조용히
+//	            "이겨도 본전 근처" 인 가격에 걸리는 것을 막는다.
+//
+// precision 은 [Runner.check] 가 1..18 로 이미 막았다 — 그래야 order.Full 이
+// 패닉하지 않는다.
+func limitTick(precision int) (order.Tick, error) {
+	return limitTickFor(limitPriceNum, limitPriceDen, precision)
+}
+
+// limitTickFor 는 [limitTick] 의 몸통이고, 가격을 인자로 받는다.
+//
+// **떼어낸 이유는 시험 가능성이다.** 상수가 0.5 미만인 한 위의 상한 검사는
+// 영영 돌지 않는다 — 그래서 그 검사를 통째로 지워도 모든 시험이 통과했다
+// (2026-08-14 변이 M4). 지금은 시험이 50/100 을 직접 넣어 그 분기를 밟는다.
+func limitTickFor(num, den int64, precision int) (order.Tick, error) {
+	full := order.Full(precision)
+	if full%den != 0 {
+		return order.Tick{}, fmt.Errorf("exec: precision %d 에서는 지정가 %d/%d 를 표현할 수 없다",
+			precision, num, den)
+	}
+	v := num * (full / den)
+	if ceiling := order.Ceiling(precision).V; v > ceiling {
+		return order.Tick{}, fmt.Errorf("exec: 지정가 틱 %d 가 0.5 미만 상한 %d 을 넘는다 (지정가 %d/%d)",
+			v, ceiling, num, den)
+	}
+	return order.NewTick(v, precision), nil
+}
+
+// legFraction 은 한 다리가 쓸 수 있는 명목의 비율이다 — 회차 목표 대비.
 //
 //	0.5   2026-08-14   다리가 둘이었다. 합쳐도 회차 상한을 넘지 않게 반씩 썼다.
 //	1.0   2026-08-14~  테이커 다리를 없앴다. 나눌 대상이 없다(사용자 결정).
 //
 // **1.0 이어도 이 상수를 지운 것이 아니다.** 다리가 다시 둘이 되는 날 나눗셈을
-// 여기 한 곳에서만 고치기 위해서다. 다리마다 `Cap/n` 을 따로 쓰면 한쪽을 고칠 때
-// 다른 쪽이 남아 합이 cap 을 넘는 날이 온다.
+// 여기 한 곳에서만 고치기 위해서다. 다리마다 목표를 따로 쓰면 한쪽을 고칠 때
+// 다른 쪽이 남아 합이 목표를 넘는 날이 온다.
 const legFraction = 1.0
 
 // legBudget 은 다리 하나에 허용되는 명목이다.
 //
-// 세 값 중 가장 작은 것을 쓴다:
+// 두 값 중 작은 쪽을 쓴다:
 //
-//	cap × legFraction        이 다리의 몫 (equity × [risk.CapFraction])
-//	Remaining                이미 나간 것을 뺀 회차 잔여
-//	StakeTarget(confidence)  확신도가 정하는 목표 크기
+//	StakeTarget(confidence) × legFraction   이 다리의 몫
+//	StakeRemaining                          이미 나간 것을 뺀 회차 잔여
 //
-// 둘째가 필요한 이유는 첫 다리가 나간 뒤 둘째 다리를 계산할 때다. 몫만 보면
-// 두 다리의 합이 cap 과 같아질 수 있는데, 사용자 제약은 **미만**이다.
+// # equity 비례 상한(4.55%)은 2026-08-17 에 빠졌다 (사용자 결정)
 //
-// 셋째가 2026-08-17 에 들어왔다(사용자 결정). 앞의 둘은 **넘으면 안 되는 선**
-// 이고 셋째는 **이만큼만 걸고 싶다**는 목표다. 순서가 이 방향인 것이 중요하다 —
-// 목표가 상한보다 크면 상한이 이기고, 작으면 목표가 이긴다. 어느 쪽이든
-// equity 대비 상한은 깨지지 않는다.
+// 그 전에는 여기서 `risk.Cap(e)` 도 함께 봤다. 자본 65 USDT 에서 그 값은
+// 2.96 USDT 였고, 확신도별 목표(1.89~10.00)의 위쪽 다섯 칸을 통째로 눌러
+// **크기 차등이 사실상 두 단계로 무너졌다.** 확신도별 크기를 넣은 이유가
+// 그 차등이므로 상한을 뺐다.
+//
+// **대가는 분명하다.** 이제 회차당 명목의 상한은 자본과 무관한 절대값
+// ([risk.MaxStakeUSD], 10 USDT)이다. 자본이 줄어도 베팅은 줄지 않는다 —
+// 자본 20 USDT 에서 conf 0.30 회차는 자본의 절반을 건다. 남은 방어는
+// [risk.StakeRemaining] 의 가용잔고 검사와 문턱뿐이다.
 //
 // confidence 가 [risk.ConfidenceWeight] 의 첫 칸 아래면 0 이다. 그 회차는
 // 문턱에서 이미 걸러지지만([Runner.check]), 문턱과 이 표가 어긋나는 날에도
 // 크기 쪽이 조용히 최대로 열리지 않도록 여기서도 0 을 준다.
 func legBudget(e risk.Equity, x risk.Exposure, confidence float64) float64 {
-	b := risk.Cap(e) * legFraction
-	if rem := risk.Remaining(e, x); rem < b {
+	b := risk.StakeTarget(confidence) * legFraction
+	if rem := risk.StakeRemaining(e, x, confidence); rem < b {
 		b = rem
-	}
-	if t := risk.StakeTarget(confidence); t < b {
-		b = t
 	}
 	return b
 }
-
-// bestBidTick 은 **주문을 내려는 순간** 우리 토큰 기준의 최우선 매수호가다.
-//
-// 세 가지를 막는다:
-//
-//	호가 없음   책이 아직 안 왔거나 매수측이 비었다. 그러면 걸 곳이 없다 —
-//	            근사하지 않고 ok=false 를 준다. 부르는 쪽이 다음 바퀴에 다시
-//	            묻는다(진입 창 안에서만).
-//	낡은 책     [Runner.StaleAfter] 를 넘게 갱신이 없으면 그 값은 시장이
-//	            아니다. 낡은 호가에 거는 것은 없는 가격에 거는 것과 같다.
-//	범위 밖     1.00 이상이나 0 이하인 틱. 거울(Down 회차) 계산이 어긋나면
-//	            나올 수 있는 값이고, order 층이 패닉하기 전에 여기서 막는다.
-//
-// **0.5 미만 상한은 없다.** 최우선호가가 0.50 이상이면 거기 그대로 건다 —
-// 2026-08-16 사용자 결정이고, 이유는 이 파일 위쪽 "0.5 미만 상한을 뺀 이유" 다.
-//
-// precision 은 [Runner.check] 가 1..18 로 이미 막았다 — 그래야 order.Full 이
-// 패닉하지 않는다.
-func (r *Runner) bestBidTick(view bookView, precision int) (order.Tick, error) {
-	if r.Book.Stale(r.monoNs(), r.StaleAfter.Nanoseconds()) {
-		return order.Tick{}, fmt.Errorf("exec: 호가창이 %s 넘게 낡았다 — 최우선 매수호가를 믿을 수 없다", r.StaleAfter)
-	}
-	s := view.sides(r.Book)
-	if !s.HasBid {
-		return order.Tick{}, errNoBid
-	}
-	if full := order.Full(precision); s.BestBid <= 0 || s.BestBid >= full {
-		return order.Tick{}, fmt.Errorf("exec: 최우선 매수호가 틱 %d 가 범위 밖이다 (1..%d)", s.BestBid, full-1)
-	}
-	return order.NewTick(s.BestBid, precision), nil
-}
-
-// errNoBid 는 "책에 매수호가가 없다" 다. 에러이긴 하지만 **사고가 아니다** —
-// 회차 초반 몇 바퀴 동안 흔히 나고, 부르는 쪽은 다음 바퀴에 다시 묻는다.
-// 값으로 두는 이유는 그 구분을 [errors.Is] 로 할 수 있게 하기 위해서다.
-var errNoBid = errors.New("exec: 오더북에 매수호가가 없다")
 
 // maxPlaceAttempts 는 주문 생성을 다시 시도하는 횟수의 상한이다.
 //
@@ -851,9 +864,9 @@ func (r *Runner) RunRound(ctx context.Context, rd live.Round, f live.Frozen, e r
 	// 매 바퀴 다시 정하면 방향이 바뀔 수 있는 자리가 생긴다 — 방향은 동결값이
 	// 정하는 것이고 회차 내내 하나여야 한다.
 	//
-	// **지정가는 여기서 정하지 않는다.** 2026-08-16 부터 최우선 매수호가에
-	// 걸므로, 가격은 주문을 내려는 순간의 책에서 나온다([Runner.bestBidTick]).
-	// 회차 시작에 미리 읽으면 그 뒤 진입까지의 시차만큼 낡은 값에 걸게 된다.
+	// **지정가는 여기서 정하지 않는다.** 가격은 상수 [LimitPrice] 이고 틱은
+	// 첫 시도 직전에 [limitTick] 이 만든다 — 회차 정밀도에만 의존하므로
+	// 언제 계산해도 같은 값이지만, 만드는 자리를 하나로 둔다.
 	view, err := newBookView(f.Direction, rd.Precision)
 	if err != nil {
 		return err
@@ -1091,44 +1104,40 @@ func (r *Runner) loop(ctx context.Context, rd live.Round, f live.Frozen, e risk.
 
 		// 3) 아직 안 걸었으면 건다. **이 블록이 회차당 한 번만 통과한다.**
 		//
-		// 2026-08-16 부터 가격이 호가창에서 온다. 책이 아직 없거나 낡았으면
-		// **이 바퀴는 걸지 않고 다음 바퀴에 다시 본다** — 진입 창 안에서만이고,
-		// 창이 지나면 위 (2) 가 회차를 닫는다. 근사한 가격에 거느니 안 거는 것이
-		// 낫다: 우리가 정하지 않은 가격에 베팅하는 것이기 때문이다.
+		// 가격은 상수 [LimitPrice] 다(2026-08-17 사용자 결정) — 호가창을 보지
+		// 않으므로 책이 비었거나 낡았다는 이유로 걸지 못하는 일이 없다. 책은
+		// 로그(`marketNote`)와 기록에만 쓴다.
 		if !placed && fillsOK && !now.Before(nextAttempt) {
-			// 다리 목록은 **첫 시도 직전에 한 번** 만든다. 가격이 여기서
-			// 얼어붙는다 — 재시도마다 호가창을 다시 읽으면 원장의 어느 줄이 어느
-			// 호가에 근거했는지 사후에 말할 수 없다.
+			// 다리 목록은 **첫 시도 직전에 한 번** 만든다.
 			if legs == nil {
-				tick, err := r.bestBidTick(view, rd.Precision)
+				tick, err := limitTick(rd.Precision)
 				if err != nil {
-					// 사고가 아니다. 회차 초반에는 책이 비어 있는 것이 정상이고,
-					// 진입 창이 지나면 (2) 가 이 회차를 조용히 닫는다.
-					if !errors.Is(err, errNoBid) {
-						r.logf("회차 %s: 최우선 매수호가를 읽지 못했다 — 이 바퀴는 걸지 않는다: %v", rd.Slug, err)
-					}
-					r.observe(st)
-					if err := r.sleep(ctx, r.poll()); err != nil {
-						return err
-					}
-					continue
+					// 이 회차의 정밀도로는 우리 지정가를 표현할 수 없다.
+					// 근사하지 않는다 — 사용자가 정하지 않은 가격에 걸릴 바에는
+					// 아무것도 걸지 않는다. precision 은 회차 상수라 다음
+					// 바퀴에 다시 물어도 답이 같으므로 여기서 끝낸다.
+					placed = true
+					r.logf("회차 %s: 지정가 틱을 만들지 못했다 — 이 회차는 걸지 않는다: %v", rd.Slug, err)
+				} else {
+					legs = r.buildLegs(tick)
 				}
-				legs = r.buildLegs(tick)
 			}
-			attempts++
-			if err := r.placeLegs(ctx, rd, f, tokenID, e, st, legs, view, now); err != nil {
-				return err
-			}
-			switch {
-			case legsDone(legs):
-				placed = true
-			case attempts >= maxPlaceAttempts:
-				// 전부 "아무것도 나가지 않았다"가 확정된 실패였다. 더 두드려도
-				// 예산만 쓴다.
-				placed = true
-				r.logf("회차 %s: 주문 생성이 %d회 연속 실패했다(전부 재시도 안전) — 이 회차는 걸지 않는다", rd.Slug, attempts)
-			default:
-				nextAttempt = now.Add(r.rejectBackoff())
+			if legs != nil {
+				attempts++
+				if err := r.placeLegs(ctx, rd, f, tokenID, e, st, legs, view, now); err != nil {
+					return err
+				}
+				switch {
+				case legsDone(legs):
+					placed = true
+				case attempts >= maxPlaceAttempts:
+					// 전부 "아무것도 나가지 않았다"가 확정된 실패였다. 더 두드려도
+					// 예산만 쓴다.
+					placed = true
+					r.logf("회차 %s: 주문 생성이 %d회 연속 실패했다(전부 재시도 안전) — 이 회차는 걸지 않는다", rd.Slug, attempts)
+				default:
+					nextAttempt = now.Add(r.rejectBackoff())
+				}
 			}
 		}
 
@@ -1181,9 +1190,8 @@ type leg struct {
 // 였다. 모델의 최근 실력(2023~ 51.8%)으로는 호가를 관통해 사는 값을 감당할 수
 // 없다는 뜻이다.
 //
-// maker 는 [Runner.bestBidTick] 이 읽은 최우선 매수호가다 — 부르는 쪽이 이미
-// 정해서 넘긴다. 여기서 다시 책을 읽지 않는 이유는 그 값이 회차당 한 번만
-// 정해져야 하기 때문이다.
+// maker 는 [limitTick] 이 만든 [LimitPrice] 의 틱이다 — 부르는 쪽이 이미
+// 정해서 넘긴다.
 func (r *Runner) buildLegs(maker order.Tick) []*leg {
 	return []*leg{{name: "메이커", tick: maker}}
 }

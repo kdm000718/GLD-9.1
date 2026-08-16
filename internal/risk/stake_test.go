@@ -122,16 +122,89 @@ func TestSmallStakesFallBelowTheMinimumOrder(t *testing.T) {
 	}
 }
 
-// MaxStakeUSD 는 CapFraction 을 대체하지 않는다. 그 둘의 관계를 쓰는 쪽은
-// exec 이지만, 어느 자본에서 어느 쪽이 이기는지는 여기 적어 두는 것이 낫다 —
-// 이 상수를 만지는 사람이 보는 파일이기 때문이다.
-func TestMaxStakeAndCapCrossOver(t *testing.T) {
-	// 자본이 MaxStakeUSD/CapFraction 보다 작으면 cap 이 이긴다.
-	cross := MaxStakeUSD / CapFraction // 219.78 USDT
-	if got := Cap(Equity{AvailableUSDT: cross}); math.Abs(got-MaxStakeUSD) > 1e-9 {
-		t.Errorf("자본 %v 에서 cap %v, 기대 %v", cross, got, MaxStakeUSD)
+// StakeRemaining 은 목표에서 노출을 뺀다. 부등호와 실패 방향은 [Remaining] 과
+// 같아야 한다 — 그 자리를 대신하기 때문이다.
+func TestStakeRemainingSubtractsExposure(t *testing.T) {
+	e := Equity{AvailableUSDT: 1000}
+	const conf = 0.30 // 최고 칸 → 목표 = MaxStakeUSD
+	if got := StakeRemaining(e, Exposure{}, conf); got != MaxStakeUSD {
+		t.Errorf("노출 0: %v, 기대 %v", got, MaxStakeUSD)
 	}
-	if got := Cap(Equity{AvailableUSDT: 65}); got >= MaxStakeUSD {
-		t.Errorf("자본 65 의 cap 이 %v 다 — 지금 계좌 규모에서는 cap 이 이겨야 한다", got)
+	if got := StakeRemaining(e, Exposure{FilledNotional: 4}, conf); got != MaxStakeUSD-4 {
+		t.Errorf("노출 4: %v, 기대 %v", got, MaxStakeUSD-4)
+	}
+	// 취소 미확인분도 센다 — 아직 체결될 수 있는 주문이다.
+	if got := StakeRemaining(e, Exposure{OpenNotional: 3, PendingCancel: 3}, conf); got != MaxStakeUSD-6 {
+		t.Errorf("미체결 3 + 취소대기 3: %v, 기대 %v", got, MaxStakeUSD-6)
+	}
+	// 정확히 목표면 0 이다. 목표는 도달해도 되는 선이 아니다.
+	if got := StakeRemaining(e, Exposure{FilledNotional: MaxStakeUSD}, conf); got != 0 {
+		t.Errorf("노출이 목표와 같을 때 %v, 기대 0", got)
+	}
+	if got := StakeRemaining(e, Exposure{FilledNotional: MaxStakeUSD + 1}, conf); got != 0 {
+		t.Errorf("노출이 목표를 넘었을 때 %v, 기대 0", got)
+	}
+}
+
+// **가용잔고가 마지막 끈이다.** equity 비례 상한이 빠진 뒤 자본과 주문 크기를
+// 잇는 것은 이것뿐이다. 이 검사가 사라지면 잔고 3 USDT 로 10 USDT 주문을 낸다.
+func TestStakeRemainingNeverExceedsTheBalance(t *testing.T) {
+	const conf = 0.30
+	for _, avail := range []float64{0, 0.5, 1, 3, 9.99} {
+		if got := StakeRemaining(Equity{AvailableUSDT: avail}, Exposure{}, conf); got > avail {
+			t.Errorf("잔고 %v 에서 %v 를 내줬다", avail, got)
+		}
+	}
+	if got := StakeRemaining(Equity{AvailableUSDT: 3}, Exposure{}, conf); got != 3 {
+		t.Errorf("잔고 3: %v, 기대 3", got)
+	}
+	// PositionCost 는 보지 않는다 — 이미 나간 돈이고 지금 쓸 수 있는 것이 아니다.
+	if got := StakeRemaining(Equity{AvailableUSDT: 3, PositionCost: 1000}, Exposure{}, conf); got != 3 {
+		t.Errorf("미정산 포지션이 잔고를 부풀렸다: %v, 기대 3", got)
+	}
+}
+
+// 망가진 입력에서는 0 이다.
+func TestStakeRemainingRefusesBrokenInput(t *testing.T) {
+	const conf = 0.30
+	ok := Equity{AvailableUSDT: 1000}
+	for _, e := range []Equity{
+		{AvailableUSDT: math.NaN()},
+		{AvailableUSDT: math.Inf(1)},
+		{AvailableUSDT: -1},
+	} {
+		if got := StakeRemaining(e, Exposure{}, conf); got != 0 {
+			t.Errorf("잔고 %v: %v, 기대 0", e.AvailableUSDT, got)
+		}
+	}
+	for _, x := range []Exposure{
+		{FilledNotional: -1},
+		{OpenNotional: math.NaN()},
+		{PendingCancel: math.Inf(1)},
+	} {
+		if got := StakeRemaining(ok, x, conf); got != 0 {
+			t.Errorf("노출 %+v: %v, 기대 0", x, got)
+		}
+	}
+	// 첫 칸 아래는 잔고가 아무리 많아도 0 이다.
+	if got := StakeRemaining(ok, Exposure{}, 0.05); got != 0 {
+		t.Errorf("conf 0.05: %v, 기대 0", got)
+	}
+}
+
+// **equity 비례 상한(CapFraction)은 크기 결정에서 빠졌다** (2026-08-17 사용자
+// 결정). 그 사실을 여기 못 박는다 — 되살리는 것은 전략 변경이다.
+//
+// [Cap]·[CanArm] 은 남아 있지만 무장 판정과 진단에만 쓰인다. 자본 65 USDT 의
+// cap 은 2.96 이고, 그 값이 크기에 다시 개입하면 확신도별 차등이 위쪽 다섯
+// 칸에서 통째로 사라진다.
+func TestCapNoLongerBoundsTheStake(t *testing.T) {
+	e := Equity{AvailableUSDT: 65} // cap 2.9575
+	if c := Cap(e); c >= StakeTarget(0.30) {
+		t.Fatalf("전제가 깨졌다: cap %v 가 목표 %v 이상이다", c, StakeTarget(0.30))
+	}
+	if got := StakeRemaining(e, Exposure{}, 0.30); got != StakeTarget(0.30) {
+		t.Errorf("StakeRemaining = %v, 기대 %v — cap 이 크기 결정에 되살아났다",
+			got, StakeTarget(0.30))
 	}
 }

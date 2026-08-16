@@ -284,7 +284,7 @@ func TestNewOrderBaselinesOnConfirmedFills(t *testing.T) {
 // cancelEverything 안에서만 지난다 — 그래서 더더욱 배선을 못 박아야 한다.
 func TestCancelledOrderIsAskedWhetherItFilled(t *testing.T) {
 	h := newHarness(t)
-	cap := h.equity.AvailableUSDT * 0.0455
+	cap := roundLimit(h)
 
 	// 취소가 확인된 그 주문은 사실 전량 체결돼 있었다. 거래소는 그래도
 	// removed 로 답한다(호가창에 없으니까).

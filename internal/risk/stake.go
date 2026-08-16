@@ -109,11 +109,11 @@ func ConfidenceWeight(confidence float64) float64 {
 	return w
 }
 
-// StakeTarget 은 이 confidence 에서 걸고 싶은 명목이다(USD).
+// StakeTarget 은 이 confidence 에서 걸 명목이다(USD).
 //
-// **상한이지 보장이 아니다.** 호출자는 이 값과 [Remaining] 중 작은 쪽을 써야
-// 한다 — equity 대비 상한은 여전히 risk.go 가 정하고, 이 파일은 그 안쪽에서
-// 크기를 낮추는 일만 한다.
+// 2026-08-17 이전에는 "걸고 싶은 값" 이었고 equity × [CapFraction] 이 그 위에
+// 상한으로 얹혀 있었다. 사용자 결정으로 그 상한이 빠지면서 **이 값이 곧 회차당
+// 상한**이 됐다. 남은 검사는 [StakeRemaining] 의 가용잔고뿐이다.
 //
 // 0 을 돌려주면 그 회차는 걸지 않는다.
 func StakeTarget(confidence float64) float64 {
@@ -126,4 +126,52 @@ func StakeTarget(confidence float64) float64 {
 		return 0
 	}
 	return t
+}
+
+// StakeRemaining 은 이 회차에 지금 추가로 걸 수 있는 명목이다.
+//
+// [Remaining] 의 자리를 대신한다. 다른 점은 기준선이 equity × [CapFraction]
+// 이 아니라 [StakeTarget](confidence) 라는 것뿐이고, 실패 방향과 부등호는
+// 그대로다:
+//
+//   - 목표에서 이미 걸린 노출을 뺀다. 정확히 목표면 0 이다 — 목표는 도달해도
+//     되는 선이 아니라 넘을 수 없는 선이고, 그 강한 부등호는 [Shares] 가 지킨다.
+//   - 노출 항이 하나라도 음수거나 유한하지 않으면 0 이다. 음수 노출은 산술적으로
+//     "여유가 더 있다" 로 읽히는데, 그것이야말로 한도를 넘기는 경로다.
+//   - **가용잔고를 넘지 않는다.** equity 비례 상한이 빠진 뒤 이것이 자본과
+//     주문 크기를 잇는 유일한 끈이다. AvailableUSDT 가 망가졌으면(음수·NaN·Inf)
+//     0 이다 — 잔고를 못 읽는 상태에서 절대값 목표를 그대로 거는 것은, 있지도
+//     않은 돈으로 베팅하는 것이다.
+//
+// PositionCost 는 보지 않는다. 그것은 이미 나간 돈이고, 지금 낼 주문이 실제로
+// 쓸 수 있는 것은 가용잔고뿐이다.
+func StakeRemaining(e Equity, x Exposure, confidence float64) float64 {
+	t := StakeTarget(confidence)
+	if t <= 0 {
+		return 0
+	}
+	if !finite(e.AvailableUSDT) || e.AvailableUSDT < 0 {
+		return 0
+	}
+	if !finite(x.FilledNotional) || x.FilledNotional < 0 {
+		return 0
+	}
+	if !finite(x.OpenNotional) || x.OpenNotional < 0 {
+		return 0
+	}
+	if !finite(x.PendingCancel) || x.PendingCancel < 0 {
+		return 0
+	}
+	used := x.Total()
+	if !finite(used) {
+		return 0
+	}
+	r := t - used
+	if r <= 0 {
+		return 0
+	}
+	if r > e.AvailableUSDT {
+		r = e.AvailableUSDT
+	}
+	return r
 }
