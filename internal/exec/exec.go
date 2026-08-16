@@ -5,7 +5,10 @@
 //
 //	메이커   주문 시점의 **최우선 매수호가**([Runner.bestBidTick]).
 //
-// 그 다리가 [risk.CapFraction] 전액을 쓴다([legBudget]).
+// 크기는 **확신도가 정하고 상한이 자른다**([legBudget]). 목표는
+// [risk.StakeTarget](confidence) 이고, 그 값이 equity × [risk.CapFraction]
+// 이나 회차 잔여보다 크면 작은 쪽이 이긴다. 2026-08-17 이전에는 확신도와
+// 무관하게 cap 전액을 썼다.
 //
 // 다리를 **옮기지 않는다.** 걸고 나면 취소했다가 다시 걸지 않는다. 회차가 끝날
 // 때까지 그 자리에 두고, 끝나면 거둔다. 가격도 첫 시도 때 한 번 읽고 얼린다 —
@@ -47,7 +50,10 @@
 // **0.5 미만 상한도 같은 날 사라졌다.** 최우선호가는 62% 의 회차에서 0.50
 // 이상이고, 상한을 두면 그 회차들이 0.49 로 끌려 내려가 체결이 안 되는 쪽으로
 // 밀린다. 대신 "이겨도 본전 근처인 자리는 사지 않는다" 는 안전장치가 없어졌다 —
-// 지금 그 역할을 하는 것은 문턱([live.ConfidenceThreshold]) 뿐이다.
+// 지금 그 역할을 하는 것은 문턱([live.ConfidenceThreshold])과, 2026-08-17 에
+// 더해진 확신도별 크기([risk.StakeTarget]) 둘이다. 문턱이 0.14 에서 0.10 으로
+// 내려간 것도 그날인데, 내려도 되는 이유가 크기 쪽에 있다 — 얇은 회차는 이제
+// 얇게 건다.
 //
 // # 다리가 둘이었다가 다시 하나가 된 이력 (2026-08-14)
 //
@@ -288,19 +294,32 @@ const legFraction = 1.0
 
 // legBudget 은 다리 하나에 허용되는 명목이다.
 //
-// 두 값 중 작은 쪽을 쓴다:
+// 세 값 중 가장 작은 것을 쓴다:
 //
-//	cap × legFraction   이 다리의 몫
-//	Remaining           이미 나간 것을 뺀 회차 잔여
+//	cap × legFraction        이 다리의 몫 (equity × [risk.CapFraction])
+//	Remaining                이미 나간 것을 뺀 회차 잔여
+//	StakeTarget(confidence)  확신도가 정하는 목표 크기
 //
-// 후자가 필요한 이유는 첫 다리가 나간 뒤 둘째 다리를 계산할 때다. 몫만 보면
+// 둘째가 필요한 이유는 첫 다리가 나간 뒤 둘째 다리를 계산할 때다. 몫만 보면
 // 두 다리의 합이 cap 과 같아질 수 있는데, 사용자 제약은 **미만**이다.
-func legBudget(e risk.Equity, x risk.Exposure) float64 {
-	share := risk.Cap(e) * legFraction
-	if rem := risk.Remaining(e, x); rem < share {
-		return rem
+//
+// 셋째가 2026-08-17 에 들어왔다(사용자 결정). 앞의 둘은 **넘으면 안 되는 선**
+// 이고 셋째는 **이만큼만 걸고 싶다**는 목표다. 순서가 이 방향인 것이 중요하다 —
+// 목표가 상한보다 크면 상한이 이기고, 작으면 목표가 이긴다. 어느 쪽이든
+// equity 대비 상한은 깨지지 않는다.
+//
+// confidence 가 [risk.ConfidenceWeight] 의 첫 칸 아래면 0 이다. 그 회차는
+// 문턱에서 이미 걸러지지만([Runner.check]), 문턱과 이 표가 어긋나는 날에도
+// 크기 쪽이 조용히 최대로 열리지 않도록 여기서도 0 을 준다.
+func legBudget(e risk.Equity, x risk.Exposure, confidence float64) float64 {
+	b := risk.Cap(e) * legFraction
+	if rem := risk.Remaining(e, x); rem < b {
+		b = rem
 	}
-	return share
+	if t := risk.StakeTarget(confidence); t < b {
+		b = t
+	}
+	return b
 }
 
 // bestBidTick 은 **주문을 내려는 순간** 우리 토큰 기준의 최우선 매수호가다.
@@ -1194,7 +1213,7 @@ func (r *Runner) placeLegs(ctx context.Context, rd live.Round, f live.Frozen, to
 // 않았음이 확정된 경우뿐이고, 그때만 호출자가 다시 부른다.
 func (r *Runner) placeLeg(ctx context.Context, rd live.Round, f live.Frozen, tokenID string,
 	e risk.Equity, st *roundState, lg *leg, view bookView, now time.Time) (done bool, err error) {
-	budget := legBudget(e, st.exposure())
+	budget := legBudget(e, st.exposure(), f.Confidence)
 	shares := risk.Shares(budget, lg.tick.Float())
 	if shares <= 0 {
 		// 자본은 회차 시작에 동결된 값이다. 앞 다리가 이미 나갔다면 노출이

@@ -1247,6 +1247,109 @@ func TestFirstOrderNeverExceedsCap(t *testing.T) {
 	}
 }
 
+// **확신도가 크기를 줄인다.** 자본이 충분해 cap 이 놀고 있어도, 확신이 낮으면
+// [risk.StakeTarget] 이 이긴다.
+//
+// 자본 100,000 → cap 4,550 이라 cap 은 어느 칸에서도 묶지 않는다. 그러면
+// 남는 상한은 StakeTarget 뿐이고, 명목이 칸마다 달라져야 한다.
+func TestConfidenceCapsTheOrderSize(t *testing.T) {
+	cases := []struct{ conf, target float64 }{
+		{0.12, risk.StakeTarget(0.12)},
+		{0.16, risk.StakeTarget(0.16)},
+		{0.30, risk.StakeTarget(0.30)},
+	}
+	var got []float64
+	for _, tc := range cases {
+		h := newHarness(t)
+		h.equity = risk.Equity{AvailableUSDT: 100_000} // cap 4,550 — 묶지 않는다
+		h.frozen.Confidence = tc.conf
+		h.frozen.PUp = 0.5 + tc.conf/2
+		if err := h.run(); err != nil {
+			t.Fatalf("conf %v: RunRound: %v", tc.conf, err)
+		}
+		if h.orders.createdCount() == 0 {
+			t.Fatalf("conf %v: 주문이 나가지 않았다 (목표 %.4f USD)", tc.conf, tc.target)
+		}
+		h.orders.mu.Lock()
+		r := h.orders.creates[0]
+		h.orders.mu.Unlock()
+		n := r.Shares * r.Tick.Float()
+		if n >= tc.target {
+			t.Errorf("conf %v: 명목 %.4f 가 목표 %.4f 이상이다 — 강한 부등호 위반", tc.conf, n, tc.target)
+		}
+		// 한 주 더 살 수 있었는데 안 산 것이 아니어야 한다 — 목표를 거의 다 쓴다.
+		if n+r.Tick.Float() < tc.target {
+			t.Errorf("conf %v: 명목 %.4f 가 목표 %.4f 에 한 주 넘게 못 미친다", tc.conf, n, tc.target)
+		}
+		got = append(got, n)
+	}
+	for i := 1; i < len(got); i++ {
+		if got[i] <= got[i-1] {
+			t.Errorf("명목이 %v — 확신도가 오르는데 크기가 늘지 않았다", got)
+		}
+	}
+}
+
+// cap 이 목표보다 작으면 cap 이 이긴다. 확신도가 최대여도 equity 대비 상한을
+// 넘지 않는다 — 이쪽 부등호가 깨지면 사용자 제약이 깨진 것이다.
+func TestCapStillWinsOverTheConfidenceTarget(t *testing.T) {
+	h := newHarness(t)
+	h.equity = risk.Equity{AvailableUSDT: 100} // cap 4.55 < StakeTarget(0.30) = 10
+	h.frozen.Confidence = 0.30
+	h.frozen.PUp = 0.65
+	if risk.StakeTarget(0.30) <= risk.Cap(h.equity) {
+		t.Fatalf("전제가 깨졌다: 목표 %v 가 cap %v 이하다", risk.StakeTarget(0.30), risk.Cap(h.equity))
+	}
+	if err := h.run(); err != nil {
+		t.Fatalf("RunRound: %v", err)
+	}
+	if h.orders.createdCount() == 0 {
+		t.Fatal("주문이 나가지 않았다")
+	}
+	h.orders.mu.Lock()
+	r := h.orders.creates[0]
+	h.orders.mu.Unlock()
+	if n := r.Shares * r.Tick.Float(); n >= risk.Cap(h.equity) {
+		t.Errorf("명목 %v 가 cap %v 이상이다", n, risk.Cap(h.equity))
+	}
+}
+
+// 확신도가 첫 칸 아래면 예산이 0 이다.
+//
+// 그런 회차는 [Runner.check] 가 이미 막는다(Eligible 인데 문턱 미달이면
+// 에러다) — 그래서 RunRound 로는 이 상태에 닿을 수 없고, 예산 함수를 직접
+// 부른다. 두 겹으로 두는 이유는 문턱 상수와 크기표가 어긋나는 날 크기 쪽이
+// 조용히 최대로 열리지 않게 하기 위해서다.
+func TestBudgetIsZeroBelowTheFirstBin(t *testing.T) {
+	e := risk.Equity{AvailableUSDT: 100_000} // cap 4,550 — 넉넉하다
+	var x risk.Exposure
+	for _, c := range []float64{0, 0.05, 0.0999, math.NaN(), math.Inf(1)} {
+		if got := legBudget(e, x, c); got != 0 {
+			t.Errorf("legBudget(conf=%v) = %v, 기대 0", c, got)
+		}
+	}
+	if got := legBudget(e, x, 0.10); got <= 0 {
+		t.Errorf("첫 칸의 하한에서 예산이 %v 다 — 문턱을 통과한 회차가 크기 0 을 받는다", got)
+	}
+}
+
+// 노출이 늘면 예산이 줄어든다 — 확신도 상한이 들어와도 이 규칙은 그대로다.
+func TestBudgetStillShrinksWithExposure(t *testing.T) {
+	e := risk.Equity{AvailableUSDT: 100} // cap 4.55
+	const conf = 0.30                    // 목표 10 > cap 이라 cap 이 이긴다
+	full := legBudget(e, risk.Exposure{}, conf)
+	part := legBudget(e, risk.Exposure{FilledNotional: 3}, conf)
+	if full != risk.Cap(e) {
+		t.Errorf("노출 0 의 예산이 %v, 기대 %v", full, risk.Cap(e))
+	}
+	if part >= full {
+		t.Errorf("노출 3 의 예산 %v 가 노출 0 의 %v 보다 작지 않다", part, full)
+	}
+	if want := risk.Cap(e) - 3; math.Abs(part-want) > 1e-12 {
+		t.Errorf("노출 3 의 예산이 %v, 기대 %v", part, want)
+	}
+}
+
 // 취소 확인 전 주문의 명목은 노출에 남는다. 회차가 그 상태로 끝나면 에러다 —
 // 거래소에 살아 있을 수 있는 주문을 조용히 잊으면 안 된다.
 func TestPendingCancelCountsAsExposure(t *testing.T) {
