@@ -109,16 +109,23 @@ func TestStakeTargetNeverExceedsMax(t *testing.T) {
 
 // **실효 문턱이 어디인지 못 박는다.**
 //
-// 목표가 [MinOrderUSD] 미만인 칸은 주문이 성립하지 않는다. MaxStakeUSD 를
+// 목표가 [MinOrderUSD] 미만인 칸은 주문이 성립하지 않는다. [MaxStakeUSD] 를
 // 바꾸면 실효 문턱이 함께 움직이므로, 그 사실이 시험에 남아 있어야 한다.
-// 지금 값(10 USDT)에서는 첫 칸만 잘리고 실효 문턱은 0.12 다.
+// 지금 값(5 USDT)에서는 앞 두 칸이 잘리고 **실효 문턱은 0.14** 다.
+//
+// 이 시험이 깨지는 날은 상한을 바꾼 날이고, 그때 바뀌는 것은 크기만이 아니라
+// "어떤 회차에 들어가는가" 다. 그래서 조용히 지나가면 안 된다.
 func TestSmallStakesFallBelowTheMinimumOrder(t *testing.T) {
-	if got := StakeTarget(0.10); got >= MinOrderUSD {
-		t.Errorf("conf 0.10 의 목표가 %v 다 — 최소 주문 이상이면 실효 문턱이 0.10 이라는 뜻이고, "+
-			"이 시험의 전제가 바뀌었다", got)
+	// 나가지 못하는 칸
+	for _, c := range []float64{0.10, 0.12, 0.135} {
+		if got := StakeTarget(c); got >= MinOrderUSD {
+			t.Errorf("conf %v 의 목표가 %v 다 — 최소 주문 이상이면 실효 문턱이 내려간 것이고, "+
+				"이 시험의 전제가 바뀌었다", c, got)
+		}
 	}
-	if got := StakeTarget(0.12); got < MinOrderUSD {
-		t.Errorf("conf 0.12 의 목표가 %v 로 최소 주문 미만이다 — 실효 문턱이 0.14 로 올라갔다", got)
+	// 나가는 첫 칸 — 여기가 실효 문턱이다
+	if got := StakeTarget(0.14); got < MinOrderUSD {
+		t.Errorf("conf 0.14 의 목표가 %v 로 최소 주문 미만이다 — 실효 문턱이 0.16 으로 올라갔다", got)
 	}
 }
 
@@ -130,12 +137,12 @@ func TestStakeRemainingSubtractsExposure(t *testing.T) {
 	if got := StakeRemaining(e, Exposure{}, conf); got != MaxStakeUSD {
 		t.Errorf("노출 0: %v, 기대 %v", got, MaxStakeUSD)
 	}
-	if got := StakeRemaining(e, Exposure{FilledNotional: 4}, conf); got != MaxStakeUSD-4 {
-		t.Errorf("노출 4: %v, 기대 %v", got, MaxStakeUSD-4)
+	if got := StakeRemaining(e, Exposure{FilledNotional: 2}, conf); got != MaxStakeUSD-2 {
+		t.Errorf("노출 2: %v, 기대 %v", got, MaxStakeUSD-2)
 	}
 	// 취소 미확인분도 센다 — 아직 체결될 수 있는 주문이다.
-	if got := StakeRemaining(e, Exposure{OpenNotional: 3, PendingCancel: 3}, conf); got != MaxStakeUSD-6 {
-		t.Errorf("미체결 3 + 취소대기 3: %v, 기대 %v", got, MaxStakeUSD-6)
+	if got := StakeRemaining(e, Exposure{OpenNotional: 1, PendingCancel: 1}, conf); got != MaxStakeUSD-2 {
+		t.Errorf("미체결 1 + 취소대기 1: %v, 기대 %v", got, MaxStakeUSD-2)
 	}
 	// 정확히 목표면 0 이다. 목표는 도달해도 되는 선이 아니다.
 	if got := StakeRemaining(e, Exposure{FilledNotional: MaxStakeUSD}, conf); got != 0 {

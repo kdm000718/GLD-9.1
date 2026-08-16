@@ -1288,9 +1288,11 @@ func TestFirstOrderNeverExceedsCap(t *testing.T) {
 // 자본 100,000 → cap 4,550 이라 cap 은 어느 칸에서도 묶지 않는다. 그러면
 // 남는 상한은 StakeTarget 뿐이고, 명목이 칸마다 달라져야 한다.
 func TestConfidenceCapsTheOrderSize(t *testing.T) {
+	// 목표가 최소 주문 $1 을 넘는 칸만 고른다 — 그 아래는 주문 자체가 성립하지
+	// 않고, 그 사실은 risk 의 TestSmallStakesFallBelowTheMinimumOrder 가 본다.
 	cases := []struct{ conf, target float64 }{
-		{0.12, risk.StakeTarget(0.12)},
-		{0.16, risk.StakeTarget(0.16)},
+		{0.14, risk.StakeTarget(0.14)},
+		{0.20, risk.StakeTarget(0.20)},
 		{0.30, risk.StakeTarget(0.30)},
 	}
 	var got []float64
